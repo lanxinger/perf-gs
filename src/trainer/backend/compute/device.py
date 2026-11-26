@@ -25,6 +25,9 @@ _BACKEND_MAP: dict[Backend, spy.DeviceType] = {
     "metal": spy.DeviceType.metal,
 }
 
+# Backend-level macros always preserved across run-specific Slang sessions on the same device.
+BACKEND_DEFINES: frozenset[str] = frozenset({"TRAINER_METAL_BACKEND"})
+
 
 def default_backend() -> Backend:
     return "metal" if sys.platform == "darwin" else "vulkan"
@@ -76,8 +79,12 @@ def create_device(
 def create_slang_session(device: spy.Device, defines: dict[str, str] | None) -> spy.SlangSession:
     """A session compiling like the device's own, but with ``defines`` as its macros."""
     # Copied field by field: desc.compiler_options is the device's live object, not a copy.
+    # Preserve only backend-level macros (e.g. TRAINER_METAL_BACKEND), never run-specific
+    # specializations from the device's initial session.
     own = device.slang_session.desc.compiler_options
-    merged_defines = dict(own.defines or {})
+    merged_defines = {
+        k: v for k, v in (own.defines or {}).items() if k in BACKEND_DEFINES
+    }
     if defines:
         merged_defines.update(defines)
     return device.create_slang_session(compiler_options=spy.SlangCompilerOptions({

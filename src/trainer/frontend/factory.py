@@ -10,7 +10,7 @@ from typing import Any
 
 import slangpy as spy
 
-from trainer.backend.compute.device import create_device, create_slang_session
+from trainer.backend.compute.device import BACKEND_DEFINES, create_device, create_slang_session
 from trainer.backend.render.pipeline import TrainingPipeline
 from trainer.backend.render.stbn_table import pixels_per_tile
 from trainer.config.config import ShaderSpecialization
@@ -74,7 +74,7 @@ class SlangSessions:
         self._device = device
         own = dict(device.slang_session.desc.compiler_options.defines or {})
         self._backend_defines = {
-            k: v for k, v in own.items() if k == "TRAINER_METAL_BACKEND"
+            k: v for k, v in own.items() if k in BACKEND_DEFINES
         }
         self._sessions = {frozenset(own.items()): device.slang_session}
 

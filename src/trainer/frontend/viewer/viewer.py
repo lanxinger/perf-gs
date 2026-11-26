@@ -541,11 +541,9 @@ class Viewer:
         count = self.live_splat_count(train_pipeline)
         # Densify keeps the count on the GPU, so this snapshot read is the panel's live source.
         self.state.publish_training(gaussians=count)
-        if count <= self.max_splats:
-            self._copy_snapshot(train_pipeline, count)
-            return
-        with self._render_lock:      # no frame may draw the new, still-empty buffers
-            self._grow(count, limit=train_pipeline.max_splats)
+        with self._render_lock:      # serialize GPU upload + cached_count with render_frame()
+            if count > self.max_splats:
+                self._grow(count, limit=train_pipeline.max_splats)
             self._copy_snapshot(train_pipeline, count)
 
     def _copy_snapshot(self, train_pipeline: TrainingPipeline, count: int) -> None:
@@ -561,8 +559,8 @@ class Viewer:
             _copy_splats(encoder, src.primitive.filter_3d.storage,
                          dst.primitive.filter_3d.storage, count, src.max_splats)
         encoder.upload_buffer_data(dst.primitive.active_count.storage, 0, np.array([count], dtype=np.uint32))
-        dst.primitive.cached_count = int(count)
         self.runtime.submit(batch)
+        dst.primitive.cached_count = int(count)
         self._pipeline.rasterizer.natural_vignetting = train_pipeline.rasterizer.natural_vignetting
         self._pipeline.set_active_sh_degree(train_pipeline.active_sh_degree)
         self._pipeline.set_extinction_hardness(train_pipeline.extinction_hardness)
