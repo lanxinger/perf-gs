@@ -135,6 +135,7 @@ class Rasterizer:
                     num_clusters=num_clusters)
 
         with commands.marker_group("bin_count"):
+            commands.clear_buffer(r.depth_count)
             commands.dispatch(k.bin_count, "bin_count",
                 thread_count=[active_n, 1, 1],
                 gaussians=primitive.values.storage,
@@ -153,15 +154,21 @@ class Rasterizer:
                 z_near=config.z_near_cull,
                 max_splats=capacity)
 
-        if self._sh is not None:
+        # On Metal, reading visible_count once after bin_count lets sh_forward, depth_sort,
+        # gather_tile_counts and scan_tile_offsets operate strictly on visible splats (~45% of live)
+        # with zero additional sync inside depth_sort.
+        vis_count = commands.read_uint(r.depth_count) if commands._emulate_indirect else None
+        vis_n = max(1, min(vis_count, capacity)) if vis_count is not None else active_n
+
+        if self._sh is not None and (vis_count is None or vis_count > 0):
             with commands.marker_group("sh_forward"):
                 commands.dispatch(k.sh_forward, "sh_forward",
-                    thread_count=[active_n, 1, 1],
+                    thread_count=[vis_n, 1, 1],
                     gaussians=primitive.values.storage,
-                    num_gaussians_counter=primitive.active_count.storage,
+                    visible_ids=r.depth_sort.values.storage,
+                    visible_count=r.depth_count.storage,
                     camera=self.camera_buffer,
                     features_rest=self._sh.features_rest.storage,
-                    tile_count_per_gaussian=r.tile_count_per_gaussian.storage,
                     blend_data=r.blend_data.storage,
                     active_sh_degree=contextual.sh_degree,
                     rest_floats=self._sh.rest_floats,
@@ -169,9 +176,9 @@ class Rasterizer:
 
         with commands.marker_group("depth_sort"):
             _, _, depth_sorted_ids = self._depth_sort.sort(
-                r.depth_count, key_bits=32, known_count=live)
+                r.depth_count, key_bits=32, known_count=vis_count)
             commands.dispatch(k.gather_tile_counts, "gather_tile_counts",
-                thread_count=[active_n, 1, 1],
+                thread_count=[vis_n, 1, 1],
                 depth_sorted_ids=depth_sorted_ids.storage,
                 depth_count=r.depth_count.storage,
                 tile_count_per_gaussian=r.tile_count_per_gaussian.storage,
@@ -179,7 +186,7 @@ class Rasterizer:
                 max_splats=capacity)
 
         with commands.marker_group("scan_tile_offsets"):
-            self._scan.scan(n=active_n, in_buf=r.tile_count_by_depth,
+            self._scan.scan(n=vis_n, in_buf=r.tile_count_by_depth,
                             out_buf=r.pair_offset_by_depth)
 
         pairs = self._sort.resources

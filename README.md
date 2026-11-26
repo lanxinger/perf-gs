@@ -126,7 +126,7 @@ This runs Quality's 3,500 steps and continues with the model it just trained. Th
 
 - **OS and Python.** Python 3.10+. Tested on Windows 11 and macOS (Apple Silicon). Linux is unverified.
 - **GPU.** Tested on the AMD Radeon RX 7900 XT (20 GB), NVIDIA RTX 4080 (16 GB), RTX 4090 (24 GB), and Apple M4 Pro (Metal). The rasterizer supports 32- and 64-lane waves through Vulkan (default on Windows/Linux), Direct3D 12 (Windows), or Metal (default on macOS; requires Xcode Command Line Tools + Apple's Metal Toolchain).
-- **VRAM.** Balanced used 2.72-2.90 GiB at loop end on the tested NVIDIA cards, 2.76-2.95 GiB on the RX 7900 XT, and 2.31 GiB base GPU buffers on Apple Silicon Metal (using native `atomic_float` gradients). Peak and viewer usage can be higher. [GPU memory measurements](docs/benchmarks.md)
+- **VRAM.** Balanced used 2.72-2.90 GiB at loop end on the tested NVIDIA cards, 2.76-2.95 GiB on the RX 7900 XT, and 2.19 GiB base GPU buffers (2.23 GiB total allocated) on Apple Silicon Metal (using packed 56 B `Gaussian3D` and native `atomic_float` gradients). Peak and viewer usage can be higher. [GPU memory measurements](docs/benchmarks.md)
 
 ## Quickstart
 Perf-gs was designed to be extremely simple to setup and install.
@@ -254,11 +254,19 @@ Quality+ stopped between 8,652 and 21,996 steps. Compared with Quality, it gaine
 
 ### Apple Silicon (Metal)
 
-| Device | Scene | Preset | Steps | Training loop | Throughput | Held-out PSNR ↑ | Final splats | Base GPU buffers |
-| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Apple M4 Pro | Tanks & Temples `truck` | Balanced | 3,000 | **43.2 s** | 69.4 it/s (72–85 steady) | 27.90 dB (32 test cams) | 1.01M | 2.31 GiB |
+Measured on an **Apple M4 Pro** (24 GB unified memory, 17.76 GiB Metal working-set budget) on Tanks & Temples (`truck` and `train`, `--backend metal --seed 42 --no-viewer --final-test-psnr`):
 
-Headless Metal run (`--backend metal --preset balanced --seed 42 --no-viewer --final-test-psnr`) using hardware FP32 `atomic_float` gradients, Metal SIMD prefix-scan backward, and cooperative 32-splat bucket preloading in the forward rasterizer.
+| Scene | Preset | Resolution | Steps | Training loop | Throughput | Held-out PSNR ↑ | Final splats | VRAM in use |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `truck` | Ultrafast (`--stbn-source white`) | 489×272 (4×) | 3,000 | **33.8 s** | **88.8 it/s** | 27.41 dB | 0.91M | 2.14 GiB |
+| `truck` | Balanced (default) | 489×272 (4×) | 3,000 | **42.3 s** | **71.0 it/s** | 27.93 dB | 1.01M | 2.23 GiB |
+| `truck` | **Quality** | 489×272 (4×) | 3,500 | **54.0 s** | **64.9 it/s** | 28.28 dB | 0.76M | 4.11 GiB |
+| `truck` | **Quality+** | 489×272 (4×) | 29,780 | **361.9 s** | **82.3 it/s** | **28.78 dB** | 0.76M | 4.13 GiB |
+| `truck` | Balanced | 978×545 (2×) | 3,000 | **89.7 s** | 33.5 it/s | 27.05 dB | 1.78M | 2.34 GiB |
+| `truck` | Balanced | 1957×1091 (1×) | 3,000 | **189.5 s** | 15.8 it/s | 27.10 dB | 1.72M | 2.74 GiB |
+| `train` | Balanced | 489×272 (4×) | 3,000 | **45.5 s** | 66.0 it/s | 21.81 dB | 1.06M | 2.23 GiB |
+
+Metal uses packed 56 B `Gaussian3D` structs (full layout parity with Vulkan/D3D12), wave-compacted visible-only `depth_sort` and `sh_forward`, hardware FP32 `atomic_float` gradients, Metal SIMD prefix-scan backward, cooperative 32-splat bucket preloading in the forward rasterizer, and sync-bracketed per-stage profiling via `--stage-timing-every`.
 
 
 ## Reconstructions

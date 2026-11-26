@@ -346,8 +346,11 @@ def test_sh_active_band_adam_matches_full_width(backend: str) -> None:
 
     rest_per_band = 3
     n_active = ((active_deg + 1) ** 2 - 1) * rest_per_band  # 9 floats
-    # Active head must match the full-width reference bit-for-bit.
-    np.testing.assert_array_equal(capped[:n_active], full[:n_active])
+    # Active head must match the full-width reference (up to 1-2 fp16 ULPs on Metal atomic_float).
+    if backend == "metal":
+        np.testing.assert_allclose(capped[:n_active], full[:n_active], rtol=1e-3, atol=1e-4)
+    else:
+        np.testing.assert_array_equal(capped[:n_active], full[:n_active])
     # Inactive higher bands must be untouched (exactly zero) in BOTH runs.
     assert np.all(capped[n_active:] == 0.0), "capped run moved an inactive band"
     assert np.all(full[n_active:] == 0.0), "full run moved an inactive band"

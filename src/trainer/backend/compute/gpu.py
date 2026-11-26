@@ -58,6 +58,7 @@ class CommandBatch:
         # Indirect buffers already written in the current encoder that can be piggybacked
         # onto the next flush+wait (e.g. adam_dispatch_args prepared at train_step start).
         self._prefetch_indirect: dict[tuple[int, int], spy.NDBuffer] = {}
+        self._has_work: bool = False
 
     @property
     def encoder(self) -> spy.CommandEncoder:
@@ -92,6 +93,7 @@ class CommandBatch:
             self._invalidate_indirect_for_kwargs(kwargs)
         self._encoder.insert_debug_marker(marker, spy.math.float3(*marker_color(marker)))
         kernel.dispatch(command_encoder=self._encoder, **kwargs)
+        self._has_work = True
 
     def dispatch_groups(self, kernel, marker: str, groups: tuple[int, int, int], **kwargs) -> None:
         """Record a direct compute dispatch with explicit threadgroup counts."""
@@ -108,6 +110,7 @@ class CommandBatch:
             pass_enc.dispatch_compute(list(groups))
         finally:
             pass_enc.end()
+        self._has_work = True
 
     def dispatch_indirect(self, kernel, marker: str, args_buf: spy.NDBuffer,
                           offset: int = 0, **kwargs) -> None:
@@ -148,6 +151,7 @@ class CommandBatch:
         for _ in self._marker_stack:
             self._encoder.pop_debug_group()
         handle = runtime.submit(self)
+        self._has_work = False
         self._encoder = runtime.device.create_command_encoder()
         for label in self._marker_stack:
             self._encoder.push_debug_group(label, spy.math.float3(*marker_color(label)))
@@ -271,11 +275,18 @@ class CommandRecorder:
             yield
             return
         batch, timer = self.batch, self.timer
+        sync_bracket = timer is not None and getattr(timer, "needs_sync_brackets", False)
+        if sync_bracket and batch._has_work:
+            handle = batch.flush_and_reopen(self.runtime)
+            self.runtime.wait_for_submit(handle)
         interval = timer.open(label, batch.encoder) if timer is not None else -1
         with batch.marker_group(label):
             try:
                 yield
             finally:
+                if sync_bracket and batch._has_work:
+                    handle = batch.flush_and_reopen(self.runtime)
+                    self.runtime.wait_for_submit(handle)
                 if timer is not None:
                     timer.close(interval, batch.encoder)
 
@@ -300,6 +311,26 @@ class CommandRecorder:
             yield
         finally:
             self.batch = previous
+
+    def clear_buffer(self, buffer: spy.NDBuffer) -> None:
+        if self.batch is not None:
+            self.batch.encoder.clear_buffer(buffer.storage)
+            self.batch._has_work = True
+            if self.batch._emulate_indirect:
+                self.batch._invalidate_indirect_for_kwargs({"_clear": buffer.storage})
+        else:
+            transient = self.runtime.command_batch("clear_buffer")
+            transient.encoder.clear_buffer(buffer.storage)
+            self.last_submit_id = self.runtime.submit(transient).submit_id
+
+    def read_uint(self, buffer: spy.NDBuffer) -> int:
+        """Flush any active batch and read a scalar uint32 counter back to the host."""
+        if self.batch is not None:
+            handle = self.batch.flush_and_reopen(self.runtime)
+            self.runtime.wait_for_submit(handle)
+        else:
+            self.runtime.wait_for_idle()
+        return int(np.frombuffer(buffer.storage.to_numpy().tobytes(), dtype=np.uint32)[0])
 
     def upload_texture(self, texture: spy.Texture, pixels) -> None:
         if self.batch is not None:

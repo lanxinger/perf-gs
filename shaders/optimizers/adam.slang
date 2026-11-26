@@ -136,11 +136,24 @@ void adamStep(
     gaussians[idx] = g;
     adam_state[idx] = storeAdamMoments(s, adamRoundingSeed(idx, cfg.step));
 
-    grad_mean_x[idx] = GradScalar(0); grad_mean_y[idx] = GradScalar(0); grad_mean_z[idx] = GradScalar(0);
-    grad_log_scale_x[idx] = GradScalar(0); grad_log_scale_y[idx] = GradScalar(0); grad_log_scale_z[idx] = GradScalar(0);
-    grad_rot_w[idx] = GradScalar(0); grad_rot_x[idx] = GradScalar(0); grad_rot_y[idx] = GradScalar(0); grad_rot_z[idx] = GradScalar(0);
-    grad_opacity[idx] = GradScalar(0);
-    grad_color_r[idx] = GradScalar(0); grad_color_g[idx] = GradScalar(0); grad_color_b[idx] = GradScalar(0);
+    if (any(g_mean != float3(0.0)))
+    {
+        grad_mean_x[idx] = GradScalar(0); grad_mean_y[idx] = GradScalar(0); grad_mean_z[idx] = GradScalar(0);
+    }
+    if (any(g_log_scale != float3(0.0)))
+    {
+        grad_log_scale_x[idx] = GradScalar(0); grad_log_scale_y[idx] = GradScalar(0); grad_log_scale_z[idx] = GradScalar(0);
+    }
+    if (any(g_rot != float4(0.0)))
+    {
+        grad_rot_w[idx] = GradScalar(0); grad_rot_x[idx] = GradScalar(0); grad_rot_y[idx] = GradScalar(0); grad_rot_z[idx] = GradScalar(0);
+    }
+    if (g_op != 0.0)
+        grad_opacity[idx] = GradScalar(0);
+    if (any(g_color != float3(0.0)))
+    {
+        grad_color_r[idx] = GradScalar(0); grad_color_g[idx] = GradScalar(0); grad_color_b[idx] = GradScalar(0);
+    }
 }
 
 #include "primitives/gaussian/sh_layout.slang"

@@ -121,6 +121,8 @@ class AdamOptimizer:
             return
         rest_floats = self._sh.rest_floats
         active_rest = min(sh_rest_coeffs(sh_degree) * 3, rest_floats) if sh_degree else 0
+        if active_rest == 0:
+            return
         with commands.marker_group("adam_rest"):
             commands.dispatch_indirect(self._k.adam_rest, "adam_rest", args,
                 features_rest=self._sh.features_rest.storage,

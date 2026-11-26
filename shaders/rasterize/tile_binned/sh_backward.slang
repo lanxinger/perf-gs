@@ -48,16 +48,18 @@ void shBackward(
     uint fu = halfFeatUints(rest_floats);
     uint gbase = gid * fu;
 
+    // Only the active bands (excluding DC): coeffs beyond deg are ignored and get zero gradient.
+    uint active_coeffs = uint((deg + 1) * (deg + 1) - 1);
+    uint active_fu = halfFeatUints(min(active_coeffs * 3u, rest_floats));
+
     // No color gradient (e.g. no tile pairs this view): every output gradient is zero.
     if (all(gaussianColor == float3(0.0)))
     {
-        for (uint u = 0u; u < fu; ++u)
+        for (uint u = 0u; u < active_fu; ++u)
             features_rest_grad[gbase + u] = 0u;
         return;
     }
 
-    // Only the active bands (excluding DC): coeffs beyond deg are ignored and get zero gradient.
-    uint active_coeffs = uint((deg + 1) * (deg + 1) - 1);
     float3 rest[SH_REST_COEFFS] = loadSHRestActive(features_rest, gid, rest_floats,
                                                    active_coeffs);
 

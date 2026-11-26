@@ -5,6 +5,39 @@
 #ifndef TRAINER_GAUSSIAN_TYPES
 #define TRAINER_GAUSSIAN_TYPES
 
+#ifdef TRAINER_METAL_BACKEND
+// Tightly packed 56 B (14 floats) on Metal, avoiding MSL's 16-byte float3 alignment
+// (80 B -> 56 B, matching Vulkan/D3D12 scalar layout and saving 30% Gaussian bandwidth).
+struct Gaussian3D
+{
+    float _mean_x, _mean_y, _mean_z;
+    float _log_scale_x, _log_scale_y, _log_scale_z;
+    float _rot_w, _rot_x, _rot_y, _rot_z;
+    float opacity;     // pre-sigmoid logit
+    float _sh0_r, _sh0_g, _sh0_b;
+
+    property float3 mean
+    {
+        get { return float3(_mean_x, _mean_y, _mean_z); }
+        set { _mean_x = newValue.x; _mean_y = newValue.y; _mean_z = newValue.z; }
+    }
+    property float3 log_scale
+    {
+        get { return float3(_log_scale_x, _log_scale_y, _log_scale_z); }
+        set { _log_scale_x = newValue.x; _log_scale_y = newValue.y; _log_scale_z = newValue.z; }
+    }
+    property float4 rot_quat
+    {
+        get { return float4(_rot_w, _rot_x, _rot_y, _rot_z); }
+        set { _rot_w = newValue.x; _rot_x = newValue.y; _rot_y = newValue.z; _rot_z = newValue.w; }
+    }
+    property float3 sh0
+    {
+        get { return float3(_sh0_r, _sh0_g, _sh0_b); }
+        set { _sh0_r = newValue.x; _sh0_g = newValue.y; _sh0_b = newValue.z; }
+    }
+};
+#else
 struct Gaussian3D
 {
     float3 mean;
@@ -13,6 +46,7 @@ struct Gaussian3D
     float opacity;     // pre-sigmoid logit
     float3 sh0;        // linear RGB = 0.5 + C0 * sh0
 };
+#endif
 
 // Offsets of each field in the flat gradient/optimizer channel order.
 namespace GaussianChannel
