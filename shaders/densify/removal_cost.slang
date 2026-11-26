@@ -9,7 +9,7 @@
 void accumulateRemovalCost(uint3 tid : SV_DispatchThreadID,
     StructuredBuffer<CameraData> camera, StructuredBuffer<BlendData> blend_data,
     StructuredBuffer<uint> tile_start, StructuredBuffer<uint> sorted_ids,
-    RWTexture2D<uint> processed, RWTexture2D<float4> image, RWStructuredBuffer<int64_t> scores,
+    RWTexture2D<uint> processed, RWTexture2D<float4> image, AtomicI64Buffer scores,
     uniform uint phase, uniform float hardness)
 {
     uint2 pixel = tid.xy * 4u + uint2(phase & 3u, phase >> 2u);
@@ -38,7 +38,7 @@ void accumulateRemovalCost(uint3 tid : SV_DispatchThreadID,
         float3 delta = j + 1 == stop ? weight * source : (weight / t) * (source - remaining);
         int64_t energy = int64_t(dot(delta, delta) * 1073741824.0);
         // One fixed-point unit distinguishes measured zero contrast from never sampled.
-        InterlockedAdd(scores[id], max(energy, int64_t(1)));
+        atomicAddI64(scores, id, max(energy, int64_t(1)));
         remaining -= weight * source;
         transmission *= t;
     }

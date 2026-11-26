@@ -333,6 +333,9 @@ class TrainingPipeline:
         self.set_active_sh_degree(contextual.sh_degree)
         group = self.commands.marker_group
         with self.commands.recording("train_step"):
+            pre_adam = self.commands._emulate_indirect
+            if pre_adam:
+                self.optimizer.prepare_step_args()
             with group("forward"):
                 self.record_forward(camera, contextual)
             with group("loss"):
@@ -342,7 +345,7 @@ class TrainingPipeline:
             with group("regularization"):
                 self.regularizer.record()
             with group("adam"):
-                self.optimizer.step(lrs, contextual.sh_degree)
+                self.optimizer.step(lrs, contextual.sh_degree, args_prepared=pre_adam)
 
     def rasterize(self, camera: Camera,
                   contextual: IterationContextualVariables | None = None) -> None:

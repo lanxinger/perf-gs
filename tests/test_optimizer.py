@@ -16,15 +16,17 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import slangpy as spy
 
 from _pipeline_testkit import TestPipeline
 from trainer.config.config import LossConfig
-from trainer.backend.compute.device import create_device
+from trainer.backend.compute.device import SHADERS_DIR, create_device
 from trainer.backend.memory.buffers import GRAD_SCALAR_COMPONENTS
+from trainer.backend.memory.layout import StructLayout
 from trainer.backend.optimize.adam import AdamOptimizer
 
 
-BACKENDS = ["vulkan", "d3d12"]
+BACKENDS = ["vulkan", "d3d12", "metal"]
 
 # MUST match adam.slang.
 BETA1 = 0.9
@@ -131,10 +133,13 @@ def test_adam_step_matches_reference(backend: str) -> None:
     )
     device.wait_for_idle()
 
-    g_out = np.frombuffer(p.buffers.primitive.values.to_numpy().tobytes(),
-                          dtype=np.float32).reshape(-1, 14)[:N].astype(np.float64)
-    # AoS AdamState: 28 floats/gaussian. Pull each channel's m/v moment in
-    # GRAD_SCALAR_COMPONENTS order via the offset tables above.
+    g_rec = np.frombuffer(p.buffers.primitive.values.to_numpy().tobytes(),
+                          dtype=p.buffers.primitive.layout.dtype)[:N]
+    g_out = np.column_stack([
+        g_rec["mean"], g_rec["log_scale"], g_rec["rot_quat"],
+        g_rec["opacity"][:, None], g_rec["sh0"],
+    ]).astype(np.float64)
+    # AoS AdamState: 28 floats/gaussian on all backends (packed on Metal too).
     adam = np.frombuffer(p.buffers.adam.state.to_numpy().tobytes(),
                          dtype=np.float32).reshape(-1, 28)[:N].astype(np.float64)
     m1_out = adam[:, _ADAM_M_IDX]

@@ -25,7 +25,7 @@ def close_test_devices():
             device.close()
 
 
-@pytest.fixture(scope="module", params=["vulkan", "d3d12"])
+@pytest.fixture(scope="module", params=["vulkan", "d3d12", "metal"])
 def gpu_device(request: pytest.FixtureRequest):
     from trainer.backend.compute.device import create_device
 

@@ -21,7 +21,7 @@ from trainer.backend.compute.device import create_device, create_slang_session
 from trainer.config.config import LossConfig
 from trainer.data.dataset import simple_camera
 
-BACKENDS = ["vulkan", "d3d12"]
+BACKENDS = ["vulkan", "d3d12", "metal"]
 
 GRAD_NAMES = [
     "mean_x", "mean_y", "mean_z",

@@ -57,12 +57,12 @@ uint extractDigit(uint word, uint radix_shift)
 
 uint getWaveIndex(uint gtid)
 {
-    return gtid / WaveGetLaneCount();
+    return gtid / trainerWaveLaneCount();
 }
 
 uint waveHistsSize()
 {
-    return (D_DIM / WaveGetLaneCount()) * RADIX;
+    return (D_DIM / trainerWaveLaneCount()) * RADIX;
 }
 
 // Clears b_global_hist once per sort; dispatch one thread per entry (2048).
@@ -161,7 +161,8 @@ void upsweep(
 
     // GlobalHistExclusiveScanWGE16: wave scans -> 256-wide exclusive scan, added to this pass's row.
     GroupMemoryBarrierWithGroupSync();
-    uint lane_count = WaveGetLaneCount();
+    uint lane_count = trainerWaveLaneCount();
+    uint lane_idx = trainerWaveLaneIndex(t);
     if (t < (RADIX / lane_count))
     {
         g_us[(t + 1u) * lane_count - 1u] +=
@@ -171,11 +172,11 @@ void upsweep(
 
     uint global_hist_offset = pass_idx * RADIX;
     uint lane_mask = lane_count - 1u;
-    uint circular_lane_shift = (WaveGetLaneIndex() + 1u) & lane_mask;
+    uint circular_lane_shift = (lane_idx + 1u) & lane_mask;
     for (uint i = t; i < RADIX; i += US_DIM)
     {
         uint index = circular_lane_shift + (i & ~lane_mask);
-        uint add = (WaveGetLaneIndex() != lane_mask ? g_us[i] : 0u)
+        uint add = (lane_idx != lane_mask ? g_us[i] : 0u)
                  + (i >= lane_count ? WaveReadLaneAt(g_us[i - 1u], 0u) : 0u);
         InterlockedAdd(b_global_hist[index + global_hist_offset], add);
     }
@@ -198,9 +199,10 @@ void scan(
     uint t = gtid.x;
 
     uint device_offset = digit * max_blocks;
-    uint lane_count = WaveGetLaneCount();
+    uint lane_count = trainerWaveLaneCount();
+    uint lane_idx = trainerWaveLaneIndex(t);
     uint lane_mask = lane_count - 1u;
-    uint circular_lane_shift = (WaveGetLaneIndex() + 1u) & lane_mask;
+    uint circular_lane_shift = (lane_idx + 1u) & lane_mask;
 
     uint parts_end = (active_blocks / SCAN_DIM) * SCAN_DIM;
     uint reduction = 0u;
@@ -220,7 +222,7 @@ void scan(
         GroupMemoryBarrierWithGroupSync();
 
         b_pass_hist[circular_lane_shift + (i & ~lane_mask) + device_offset] =
-            (WaveGetLaneIndex() != lane_mask ? g_scan[t] : 0u)
+            (lane_idx != lane_mask ? g_scan[t] : 0u)
             + (t >= lane_count ? WaveReadLaneAt(g_scan[t - 1u], 0u) : 0u)
             + reduction;
 
@@ -248,7 +250,7 @@ void scan(
     if (index < active_blocks)
     {
         b_pass_hist[index + device_offset] =
-            (WaveGetLaneIndex() != lane_mask ? g_scan[t] : 0u)
+            (lane_idx != lane_mask ? g_scan[t] : 0u)
             + (t >= lane_count ? g_scan[(t & ~lane_mask) - 1u] : 0u)
             + reduction;
     }
@@ -274,19 +276,21 @@ void warpLevelMultiSplitWGE16(uint key, uint radix_shift, uint wave_parts,
 
 uint waveFlagsWGE16()
 {
-    return ((WaveGetLaneCount() & 31u) != 0u) ? ((1u << WaveGetLaneCount()) - 1u) : 0xFFFFFFFFu;
+    uint lane_count = trainerWaveLaneCount();
+    return ((lane_count & 31u) != 0u) ? ((1u << lane_count) - 1u) : 0xFFFFFFFFu;
 }
 
-void countPeerBits(inout uint peerBits, inout uint totalBits,
+void countPeerBits(uint gtid, inout uint peerBits, inout uint totalBits,
                    uint4 waveFlags, uint wave_parts)
 {
+    uint lane_idx = trainerWaveLaneIndex(gtid);
     for (uint wp = 0u; wp < wave_parts; ++wp)
     {
-        if (WaveGetLaneIndex() >= wp * 32u)
+        if (lane_idx >= wp * 32u)
         {
-            uint ltMask = (WaveGetLaneIndex() >= (wp + 1u) * 32u)
+            uint ltMask = (lane_idx >= (wp + 1u) * 32u)
                 ? 0xFFFFFFFFu
-                : ((1u << (WaveGetLaneIndex() & 31u)) - 1u);
+                : ((1u << (lane_idx & 31u)) - 1u);
             peerBits += countbits(waveFlags[wp] & ltMask);
         }
         totalBits += countbits(waveFlags[wp]);
@@ -312,7 +316,7 @@ uint findLowestRankPeer(uint4 waveFlags, uint wave_parts)
 OffsetStruct rankKeysWGE16(uint gtid, KeyStruct keys, uint radix_shift)
 {
     OffsetStruct offsets;
-    uint wave_parts = (WaveGetLaneCount() + 31u) / 32u;
+    uint wave_parts = (trainerWaveLaneCount() + 31u) / 32u;
     [unroll]
     for (uint i = 0u; i < KEYS_PER_THREAD; ++i)
     {
@@ -331,7 +335,7 @@ OffsetStruct rankKeysWGE16(uint gtid, KeyStruct keys, uint radix_shift)
 
         uint peerBits = 0u;
         uint totalBits = 0u;
-        countPeerBits(peerBits, totalBits, waveFlags, wave_parts);
+        countPeerBits(gtid, peerBits, totalBits, waveFlags, wave_parts);
 
         uint preInc = 0u;
         if (peerBits == 0u)
@@ -356,20 +360,22 @@ uint waveHistInclusiveScanCircularShiftWGE16(uint gtid)
 // Exclusive scan of the per-digit totals across all 256 digits (circular lane shift).
 void waveHistReductionExclusiveScanWGE16(uint gtid, uint histReduction)
 {
+    uint lane_count = trainerWaveLaneCount();
+    uint lane_idx = trainerWaveLaneIndex(gtid);
     if (gtid < RADIX)
     {
-        uint lane_mask = WaveGetLaneCount() - 1u;
-        g_d[((WaveGetLaneIndex() + 1u) & lane_mask) + (gtid & ~lane_mask)] = histReduction;
+        uint lane_mask = lane_count - 1u;
+        g_d[((lane_idx + 1u) & lane_mask) + (gtid & ~lane_mask)] = histReduction;
     }
     GroupMemoryBarrierWithGroupSync();
 
-    if (gtid < RADIX / WaveGetLaneCount())
+    if (gtid < RADIX / lane_count)
     {
-        g_d[gtid * WaveGetLaneCount()] = WavePrefixSum(g_d[gtid * WaveGetLaneCount()]);
+        g_d[gtid * lane_count] = WavePrefixSum(g_d[gtid * lane_count]);
     }
     GroupMemoryBarrierWithGroupSync();
 
-    if (gtid < RADIX && WaveGetLaneIndex() != 0u)
+    if (gtid < RADIX && lane_idx != 0u)
         g_d[gtid] += WaveReadLaneAt(g_d[gtid - 1u], 1u);
 }
 
@@ -377,7 +383,7 @@ void waveHistReductionExclusiveScanWGE16(uint gtid, uint histReduction)
 void updateOffsetsWGE16(uint gtid, inout OffsetStruct offsets, KeyStruct keys,
                         uint radix_shift)
 {
-    if (gtid >= WaveGetLaneCount())
+    if (gtid >= trainerWaveLaneCount())
     {
         uint tw = getWaveIndex(gtid) * RADIX;
         [unroll]
@@ -413,12 +419,13 @@ KeyStruct loadKeysWGE16Sel(uint gtid, uint part_index, uint key_word,
                            StructuredBuffer<uint> keys_hi)
 {
     KeyStruct keys;
-    uint base = WaveGetLaneIndex() + getWaveIndex(gtid) * KEYS_PER_THREAD * WaveGetLaneCount()
+    uint lane_count = trainerWaveLaneCount();
+    uint base = trainerWaveLaneIndex(gtid) + getWaveIndex(gtid) * KEYS_PER_THREAD * lane_count
               + part_index * PART_SIZE;
     [unroll]
     for (uint i = 0u; i < KEYS_PER_THREAD; ++i)
     {
-        keys.k[i] = readWord(base + i * WaveGetLaneCount(), key_word, keys_lo, keys_hi);
+        keys.k[i] = readWord(base + i * lane_count, key_word, keys_lo, keys_hi);
     }
     return keys;
 }
@@ -429,12 +436,13 @@ KeyStruct loadKeysPartialWGE16Sel(uint gtid, uint part_index, uint key_word,
                                   uint n_bound)
 {
     KeyStruct keys;
-    uint base = WaveGetLaneIndex() + getWaveIndex(gtid) * KEYS_PER_THREAD * WaveGetLaneCount()
+    uint lane_count = trainerWaveLaneCount();
+    uint base = trainerWaveLaneIndex(gtid) + getWaveIndex(gtid) * KEYS_PER_THREAD * lane_count
               + part_index * PART_SIZE;
     [unroll]
     for (uint i = 0u; i < KEYS_PER_THREAD; ++i)
     {
-        uint idx = base + i * WaveGetLaneCount();
+        uint idx = base + i * lane_count;
         keys.k[i] = (idx < n_bound) ? readWord(idx, key_word, keys_lo, keys_hi) : SENTINEL;
     }
     return keys;
@@ -444,11 +452,12 @@ KeyStruct loadKeysPartialWGE16Sel(uint gtid, uint part_index, uint key_word,
 KeyStruct loadKeysWGE16(uint gtid, uint part_index, StructuredBuffer<uint> buf)
 {
     KeyStruct keys;
-    uint base = WaveGetLaneIndex() + getWaveIndex(gtid) * KEYS_PER_THREAD * WaveGetLaneCount()
+    uint lane_count = trainerWaveLaneCount();
+    uint base = trainerWaveLaneIndex(gtid) + getWaveIndex(gtid) * KEYS_PER_THREAD * lane_count
               + part_index * PART_SIZE;
     [unroll]
     for (uint i = 0u; i < KEYS_PER_THREAD; ++i)
-        keys.k[i] = buf[base + i * WaveGetLaneCount()];
+        keys.k[i] = buf[base + i * lane_count];
     return keys;
 }
 
@@ -456,12 +465,13 @@ KeyStruct loadKeysPartialWGE16(uint gtid, uint part_index,
                                StructuredBuffer<uint> buf, uint n_bound)
 {
     KeyStruct keys;
-    uint base = WaveGetLaneIndex() + getWaveIndex(gtid) * KEYS_PER_THREAD * WaveGetLaneCount()
+    uint lane_count = trainerWaveLaneCount();
+    uint base = trainerWaveLaneIndex(gtid) + getWaveIndex(gtid) * KEYS_PER_THREAD * lane_count
               + part_index * PART_SIZE;
     [unroll]
     for (uint i = 0u; i < KEYS_PER_THREAD; ++i)
     {
-        uint idx = base + i * WaveGetLaneCount();
+        uint idx = base + i * lane_count;
         keys.k[i] = (idx < n_bound) ? buf[idx] : SENTINEL;
     }
     return keys;

@@ -20,7 +20,7 @@ from trainer.config.config import DensifyConfig, StructureConfig
 from trainer.config.config import DensificationProperties, IterationContextualVariables
 from trainer.data.dataset import simple_camera
 
-BACKENDS = ["vulkan", "d3d12"]
+BACKENDS = ["vulkan", "d3d12", "metal"]
 SIZE = 32
 FIXED_SCALE = 65536.0
 
@@ -112,8 +112,9 @@ def test_densify_prunes_underweight_splats(backend: str, structure: bool,
 
     pipeline.runtime.wait_for_idle()
     count = int(pipeline.buffers.primitive.active_count.to_numpy().view(np.uint32)[0])
-    means = np.frombuffer(pipeline.buffers.primitive.values.to_numpy().tobytes(),
-                          np.float32).reshape(-1, 14)[:count, 0]
+    records = np.frombuffer(pipeline.buffers.primitive.values.to_numpy().tobytes(),
+                            dtype=pipeline.buffers.primitive.layout.dtype)[:count]
+    means = records["mean"][:, 0]
     np.testing.assert_allclose(np.sort(means), survivors, atol=1e-6)
 
 

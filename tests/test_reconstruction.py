@@ -108,9 +108,10 @@ def test_a_cuda_build_that_cannot_start_falls_back_to_the_no_cuda_zip(tmp_path,
     def fake_download(url: str, dest: Path, _progress) -> bool:
         installed.append(url)
         with zipfile.ZipFile(dest, "w") as z:
-            z.writestr("bin/colmap.exe" if os.name == "nt" else "bin/colmap", "")
+            z.writestr("bin/colmap.exe", "")
         return True
 
+    monkeypatch.setattr(tl, "_WINDOWS", True)
     monkeypatch.setattr(tl, "_download", fake_download)
     # STATUS_DLL_NOT_FOUND from the cuda build, fine from the no-cuda one.
     monkeypatch.setattr(tl, "_starts", lambda exe, _p: "nocuda" in str(exe))

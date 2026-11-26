@@ -111,8 +111,8 @@ void decideActionsStructure(
 
     // One reservation per wave; only these parents need split workgroups.
     bool selected = out_action == ACTION_SPLIT || out_action == ACTION_CLONE;
-    uint wave_count = WaveActiveCountBits(selected);
-    uint offset = WavePrefixCountBits(selected);
+    uint wave_count = WaveActiveSum(selected ? 1u : 0u);
+    uint offset = WavePrefixSum(selected ? 1u : 0u);
     uint base = 0u;
     uint requested = out_action == ACTION_SPLIT ? nkx * nky * nkz - 1u
                    : (out_action == ACTION_CLONE ? 1u : 0u);

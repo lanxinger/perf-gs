@@ -6,11 +6,13 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import slangpy as spy
 from _colmap_testkit import write_colmap_scene
 from _pipeline_testkit import TestPipeline
 
-from trainer.backend.compute.device import create_device
+from trainer.backend.compute.device import SHADERS_DIR, create_device
 from trainer.backend.memory.buffers import GRAD_SCALAR_COMPONENTS
+from trainer.backend.memory.layout import StructLayout
 from trainer.backend.optimize.adam import AdamOptimizer
 from trainer.backend.render.pipeline import TrainingPipeline
 from trainer.config.config import AdamLRs, AppearanceConfig, LossConfig
@@ -28,7 +30,7 @@ V_IDX = [3, 4, 5, 9, 10, 11, 16, 17, 18, 19, 21, 25, 26, 27]
 BF16_ULP = 2.0 ** -7
 
 
-@pytest.fixture(params=["vulkan", "d3d12"])
+@pytest.fixture(params=["vulkan", "d3d12", "metal"])
 def backend(request):
     return request.param
 

@@ -12,7 +12,7 @@ void accumulateIter(
     uint3 dtid: SV_DispatchThreadID,
     RWStructuredBuffer<int64_t> grad_2d_x_iter,
     RWStructuredBuffer<int64_t> grad_2d_y_iter,
-    RWStructuredBuffer<int64_t> grad_mean_2d_mag_accum,
+    AtomicI64Buffer grad_mean_2d_mag_accum,
     RWStructuredBuffer<uint> visibility_count_accum,
     StructuredBuffer<uint> num_gaussians_counter,
     // Cluster-cull mask: seeded all-ones when disabled.
@@ -36,7 +36,7 @@ void accumulateIter(
     float fy = fromFixed(iy) * (frame_dim.y * 0.5);
     float m = sqrt(fx * fx + fy * fy);
 
-    InterlockedAdd(grad_mean_2d_mag_accum[i], toFixed(m));
+    atomicAddI64(grad_mean_2d_mag_accum, i, toFixed(m));
     InterlockedAdd(visibility_count_accum[i], 1u);
 
     grad_2d_x_iter[i] = int64_t(0);

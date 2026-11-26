@@ -23,7 +23,7 @@ from trainer.backend.compute.device import create_device
 from trainer.backend.densify.morton import morton_bounds
 
 
-BACKENDS = ["vulkan", "d3d12"]
+BACKENDS = ["vulkan", "d3d12", "metal"]
 
 
 def _setup(backend: str, max_splats: int = 64) -> TestPipeline:
@@ -87,9 +87,10 @@ def test_morton_sort_permutes_gaussians(backend: str) -> None:
     )
 
     # Fingerprint adam_state per slot too, so a permute-mismatch shows up
-    # as a paired-move violation. AdamState is 28 float32s = 112 bytes.
-    adam_raw = np.zeros((max_splats, 28), dtype=np.float32)
-    # Encode slot index in adam_state.mean_m.x for later cross-check.
+    # as a paired-move violation. Stride comes from reflection (28 on scalar, 36 on Metal).
+    adam_stride_floats = pipeline.buffers.adam.state.storage.size // (max_splats * 4)
+    adam_raw = np.zeros((max_splats, adam_stride_floats), dtype=np.float32)
+    # Encode slot index in adam_state.mean_m.x (offset 0) for later cross-check.
     adam_raw[:, 0] = np.arange(max_splats, dtype=np.float32)
     pipeline.buffers.adam.state.copy_from_numpy(adam_raw)
 
@@ -100,9 +101,9 @@ def test_morton_sort_permutes_gaussians(backend: str) -> None:
 
     # Read back post-sort state.
     raw = pipeline.buffers.primitive.values.to_numpy()
-    floats = np.frombuffer(raw.tobytes(), dtype=np.float32).reshape(-1, 14)
-    sorted_means = floats[:n, 0:3]
-    sorted_sh0 = floats[:n, 11:14]
+    records = np.frombuffer(raw.tobytes(), dtype=pipeline.buffers.primitive.layout.dtype)
+    sorted_means = records["mean"][:n]
+    sorted_sh0 = records["sh0"][:n]
 
     # (1) Permutation, not lossy: the multiset of means matches input.
     #     Sort both by lex(mean.xyz) and compare.
@@ -120,7 +121,7 @@ def test_morton_sort_permutes_gaussians(backend: str) -> None:
     #     mean_m.x = slot_index; sh0.r = slot_index (color_logits[..., 0]).
     #     After sort, each output slot i must have mean_m.x == sh0.r.
     adam_out = pipeline.buffers.adam.state.to_numpy()
-    adam_floats = np.frombuffer(adam_out.tobytes(), dtype=np.float32).reshape(-1, 28)
+    adam_floats = np.frombuffer(adam_out.tobytes(), dtype=np.float32).reshape(max_splats, adam_stride_floats)
     sorted_mean_m_x = adam_floats[:n, 0]
     sorted_sh0_r = sorted_sh0[:, 0]
     assert np.allclose(sorted_mean_m_x, sorted_sh0_r), (

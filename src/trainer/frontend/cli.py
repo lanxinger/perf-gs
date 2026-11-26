@@ -6,6 +6,7 @@ also offers are declared once as shared ``settings.SETTINGS`` rows and mounted v
 from __future__ import annotations
 
 import argparse
+import sys
 from collections.abc import Sequence
 
 from trainer.common.lens import parse_strength
@@ -267,7 +268,12 @@ def build_parser() -> argparse.ArgumentParser:
     _shared(parser, "splat_kernel")
     _shared(parser, "splat_profile_power")
     _shared(parser, "splat_profile_onset")
-    parser.add_argument("--backend", type=str, default="vulkan", choices=["vulkan", "d3d12"])
+    parser.add_argument(
+        "--backend",
+        type=str,
+        default="metal" if sys.platform == "darwin" else "vulkan",
+        choices=["vulkan", "d3d12", "metal"],
+    )
     parser.add_argument("--seed", type=int, default=0)
     _shared(parser, "mip_splatting")
     parser.add_argument("--mip-kernel-size", type=float, default=0.1,

@@ -135,9 +135,8 @@ def test_small_gaussian_clones_not_splits(gpu_device) -> None:
     assert actions["n_split"] == 0
     assert _count(p) == 2, f"clone should append exactly 1 duplicate, got {_count(p)}"
 
-    # The clone is an exact duplicate of the parent (same first-14 floats).
-    g = np.frombuffer(p.buffers.primitive.values.to_numpy().tobytes(),
-                      dtype=np.float32).reshape(-1, 14)
+    # The clone is an exact duplicate of the parent (same 14 semantic floats).
+    g = _read_gaussians(p, 2)
     assert np.allclose(g[0], g[1]), "clone is not an exact duplicate of the parent"
 
 
@@ -404,10 +403,9 @@ def test_anisotropic_split_preserves_covariance(gpu_device) -> None:
     m = _count(p)
     assert m == 6, f"expected 3*2*1 = 6 grid children, got {m}"
 
-    # Read back the 6 children: packed 14 floats each (mean[0:3], log_scale[3:6],
+    # Read back the 6 children: 14 semantic floats each (mean[0:3], log_scale[3:6],
     # rot_quat[6:10], opacity[10], sh0[11:14]).
-    g = np.frombuffer(p.buffers.primitive.values.to_numpy().tobytes(),
-                      dtype=np.float32).reshape(-1, 14)[:m].astype(np.float64)
+    g = _read_gaussians(p, m).astype(np.float64)
     child_means = g[:, 0:3]
     child_scales = np.exp(g[:, 3:6])
 
@@ -509,9 +507,12 @@ def test_scoring_kernel_flags_large_gaussian(gpu_device) -> None:
 def _read_gaussians(p: TestPipeline, n: int) -> np.ndarray:
     """Read back the first n gaussians as an (n, 14) float array (mean[0:3],
     log_scale[3:6], rot_quat[6:10], opacity[10], sh0[11:14])."""
-    g = np.frombuffer(p.buffers.primitive.values.to_numpy().tobytes(),
-                      dtype=np.float32).reshape(-1, 14)
-    return g[:n]
+    rec = np.frombuffer(p.buffers.primitive.values.to_numpy().tobytes(),
+                        dtype=p.buffers.primitive.layout.dtype)[:n]
+    return np.column_stack([
+        rec["mean"], rec["log_scale"], rec["rot_quat"],
+        rec["opacity"][:, None], rec["sh0"],
+    ])
 
 
 def _read_eta(p: TestPipeline, n: int) -> dict[str, np.ndarray]:

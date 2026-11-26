@@ -11,7 +11,7 @@ from _pipeline_testkit import TestPipeline
 from trainer.backend.compute.device import create_device
 
 
-@pytest.mark.parametrize("backend", ["vulkan", "d3d12"])
+@pytest.mark.parametrize("backend", ["vulkan", "d3d12", "metal"])
 def test_opacity_cap_clamps_only_values_above_cap(backend: str) -> None:
     try:
         device = create_device(backend=backend)

@@ -23,7 +23,7 @@ from trainer.config.config import LossConfig, RegularizationConfig
 from trainer.backend.compute.device import create_device
 
 
-BACKENDS = ["vulkan", "d3d12"]
+BACKENDS = ["vulkan", "d3d12", "metal"]
 
 
 def _scene():

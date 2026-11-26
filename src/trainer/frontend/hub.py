@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
+import threading
 import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -98,26 +101,44 @@ class TrainingHub:
         )
         if self.app.error_log is not None:
             self.app.error_log.attach(self.app.viewer.state)
+
+        def _hub_controller() -> None:
+            state = self.app._viewer.state
+            state.set_recon_cuda(self.app.args.recon_cuda)
+            tools = ReconTools(colmap_bin=self.app.args.colmap_bin,
+                               glomap_bin=self.app.args.glomap_bin,
+                               recon_cuda=self.app.args.recon_cuda)
+            state.tools(ToolsState.READY if tools.is_ready() else ToolsState.MISSING)
+            if self.app.args.scene:
+                self._hub_dropped(str(self.app.args.scene))
+            else:
+                state.notify("Open or drop a dataset folder", OK)
+            print("[hub] viewer ready.")
+
+            while True:
+                scene_dir = self._hub_choose_scene(tools)
+                if scene_dir is None:
+                    print("[hub] window closed; exiting.")
+                    return
+                self._hub_train_scene(scene_dir, setup)
+
+        if sys.platform == "darwin" and hasattr(self.app.viewer, "run_blocking"):
+            # AppKit/Cocoa requires window creation and event pumping on the main thread.
+            def _start_worker_once_ready() -> None:
+                # Wait briefly for the viewer's _running flag to go live before the controller checks is_alive().
+                while not self.app.viewer.is_alive():
+                    time.sleep(0.01)
+                _hub_controller()
+            worker = threading.Thread(target=_start_worker_once_ready, daemon=True)
+            worker.start()
+            try:
+                self.app.viewer.run_blocking()
+            finally:
+                worker.join(timeout=3.0)
+            return
+
         self.app.viewer.start()
-
-        state = self.app._viewer.state
-        state.set_recon_cuda(self.app.args.recon_cuda)
-        tools = ReconTools(colmap_bin=self.app.args.colmap_bin,
-                           glomap_bin=self.app.args.glomap_bin,
-                           recon_cuda=self.app.args.recon_cuda)
-        state.tools(ToolsState.READY if tools.is_ready() else ToolsState.MISSING)
-        if self.app.args.scene:
-            self._hub_dropped(str(self.app.args.scene))
-        else:
-            state.notify("Open or drop a dataset folder", OK)
-        print("[hub] viewer ready.")
-
-        while True:
-            scene_dir = self._hub_choose_scene(tools)
-            if scene_dir is None:
-                print("[hub] window closed; exiting.")
-                return
-            self._hub_train_scene(scene_dir, setup)
+        _hub_controller()
 
     def _hub_choose_scene(self, tools) -> "str | None":
         """Service panel requests until a scene is ready; ``None`` once the window closes.
@@ -168,8 +189,9 @@ class TrainingHub:
                 state.show_next_run_setup(False)
             elif command in ("browse", "new_dataset"):
                 from slangpy import platform
+                call_ui = getattr(self.app._viewer, "call_on_ui_thread", lambda fn: fn())
                 try:
-                    folder = platform.choose_folder_dialog()
+                    folder = call_ui(platform.choose_folder_dialog)
                 except (AttributeError, OSError, RuntimeError):
                     state.notify("Folder picker unavailable. Drop a dataset folder onto the window.", WARN)
                 else:
@@ -342,8 +364,11 @@ class TrainingHub:
             state.result_failed("Nothing to export yet - train a scene first.")
             state.notify("Nothing to export", WARN)
             return False
+        call_ui = getattr(self.app._viewer, "call_on_ui_thread", lambda fn: fn())
         try:
-            path = platform.save_file_dialog([platform.FileDialogFilter("Gaussian model", "*.ply")])
+            path = call_ui(
+                lambda: platform.save_file_dialog([platform.FileDialogFilter("Gaussian model", "*.ply")])
+            )
         except (AttributeError, OSError, RuntimeError):
             path = self.app.paths.root / "output.ply"
             if path.exists():
@@ -380,15 +405,19 @@ class TrainingHub:
         return True
 
     def _hub_reveal_export(self) -> None:
-        """Open the exported file's folder in the OS file manager.
-        Windows-only on purpose: ``os.startfile`` needs no extra dependency."""
+        """Open the exported file's folder in the OS file manager."""
         state = self.app._viewer.state
         exported = state.snapshot().result.exported_path
         if not exported:
             return
         folder = Path(exported).parent
         try:
-            os.startfile(str(folder))   # user-initiated, this machine only
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", str(folder)])
+            elif os.name == "nt":
+                os.startfile(str(folder))   # user-initiated, this machine only
+            else:
+                subprocess.Popen(["xdg-open", str(folder)])
         except (AttributeError, OSError) as error:
             state.result_failed(f"Could not open {folder}: {error}")
             state.notify("Could not open the folder", ERROR)

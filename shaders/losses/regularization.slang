@@ -13,10 +13,10 @@ void addRegularization(
     uint3 dtid: SV_DispatchThreadID,
     StructuredBuffer<Gaussian3D> gaussians,
     StructuredBuffer<uint> num_gaussians_counter,
-    RWStructuredBuffer<int64_t> grad_opacity,
-    RWStructuredBuffer<int64_t> grad_log_scale_x,
-    RWStructuredBuffer<int64_t> grad_log_scale_y,
-    RWStructuredBuffer<int64_t> grad_log_scale_z,
+    AtomicI64Buffer grad_opacity,
+    AtomicI64Buffer grad_log_scale_x,
+    AtomicI64Buffer grad_log_scale_y,
+    AtomicI64Buffer grad_log_scale_z,
     StructuredBuffer<uint> cluster_visible,
     uniform float w_opacity,
     uniform float w_scale)
@@ -34,15 +34,15 @@ void addRegularization(
     {
         float sig = sigmoid(g.opacity);
         float d_opa = w_opacity * sig * (1.0 - sig) * inv_n;
-        InterlockedAdd(grad_opacity[i], toFixed(d_opa));
+        atomicAddI64(grad_opacity, i, toFixed(d_opa));
     }
 
     if (w_scale > 0.0)
     {
         float3 scale = exp(g.log_scale);
         float3 d_scale = w_scale * scale * inv_n;
-        InterlockedAdd(grad_log_scale_x[i], toFixed(d_scale.x));
-        InterlockedAdd(grad_log_scale_y[i], toFixed(d_scale.y));
-        InterlockedAdd(grad_log_scale_z[i], toFixed(d_scale.z));
+        atomicAddI64(grad_log_scale_x, i, toFixed(d_scale.x));
+        atomicAddI64(grad_log_scale_y, i, toFixed(d_scale.y));
+        atomicAddI64(grad_log_scale_z, i, toFixed(d_scale.z));
     }
 }

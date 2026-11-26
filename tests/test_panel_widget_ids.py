@@ -27,7 +27,7 @@ from trainer.backend.compute.device import create_device
 from trainer.frontend.viewer.session import Session
 from trainer.frontend.viewer.ui.panel import Panel
 
-BACKENDS = ["vulkan", "d3d12"]
+BACKENDS = ["vulkan", "d3d12", "metal"]
 
 # Widget kinds whose identity ImGui derives from the label. ``Text``/``Group``
 # are excluded: text is not interactive, and group titles are already distinct

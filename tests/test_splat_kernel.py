@@ -25,7 +25,7 @@ from trainer.config.config_types import SplatKernel
 from trainer.data.dataset import simple_camera
 from trainer.frontend.factory import shader_defines
 
-BACKENDS = ["vulkan", "d3d12"]
+BACKENDS = ["vulkan", "d3d12", "metal"]
 # (kernel, profile power): the default, each density kernel, and a flat-top profile
 # with and without optical depth.
 KERNELS = [(SplatKernel.GAUSSIAN, 1.0), (SplatKernel.DENSITY, 1.0),

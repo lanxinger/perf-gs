@@ -16,6 +16,8 @@ the flags ``cli.py`` mounts from the shared ``trainer.frontend.settings`` table.
 
 from __future__ import annotations
 
+import sys
+
 from trainer.frontend.cli import build_parser
 
 # dest -> default, exactly as build_parser() defines today. This is the frozen
@@ -101,7 +103,7 @@ EXPECTED_DEFAULTS = {
     "splat_kernel": "gaussian",
     "splat_profile_power": 1.0,
     "splat_profile_onset": 0.0,
-    "backend": "vulkan",
+    "backend": "metal" if sys.platform == "darwin" else "vulkan",
     "seed": 0,
     "mip_splatting": True,
     "mip_kernel_size": 0.1,
@@ -164,6 +166,7 @@ def test_cli_flag_set_frozen() -> None:
 
 
 def test_cli_backend_choices() -> None:
-    """Backend is restricted to the two supported RHI backends."""
+    """Backend is restricted to the supported RHI backends."""
     assert build_parser().parse_args(["--backend", "d3d12"]).backend == "d3d12"
     assert build_parser().parse_args(["--backend", "vulkan"]).backend == "vulkan"
+    assert build_parser().parse_args(["--backend", "metal"]).backend == "metal"

@@ -20,11 +20,13 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import slangpy as spy
 
 from trainer.data.dataset import simple_camera
 from trainer.backend.compute.execution import (
     RASTER_BUCKET_SIZE, TILE_WIDTH, TILE_HEIGHT, TILE_AREA)
-from trainer.backend.compute.device import create_device
+from trainer.backend.compute.device import SHADERS_DIR, create_device
+from trainer.backend.memory.layout import StructLayout
 from _pipeline_testkit import TestPipeline
 
 
@@ -62,7 +64,7 @@ def _sh_dc(sh0):
     return 0.5 + C0 * np.asarray(sh0, dtype=np.float64)
 
 
-@pytest.mark.parametrize("backend", ["vulkan", "d3d12"])
+@pytest.mark.parametrize("backend", ["vulkan", "d3d12", "metal"])
 def test_forward_checkpoints_reconstruct(backend: str) -> None:
     try:
         device = create_device(backend=backend)
@@ -106,17 +108,8 @@ def test_forward_checkpoints_reconstruct(backend: str) -> None:
     # sorted result may be in A or B ping-pong; use the stashed sorted buffer.
     sorted_ids = np.frombuffer(pipeline.rasterizer.sorted_values.to_numpy().tobytes(), dtype=np.uint32)
 
-    proj = b.raster.projected_2d.to_numpy()
-    proj_f = np.frombuffer(proj.tobytes(), dtype=np.float32)
-    # Projected2DGaussian layout: mean(2) cov2d(3) depth(1) ... read defensively
-    # by re-deriving stride from buffer size.
-    stride = proj_f.size // pipeline.max_splats
-    proj_f = proj_f.reshape(pipeline.max_splats, stride)
-
-    gauss = b.primitive.values.to_numpy()
-    gf = np.frombuffer(gauss.tobytes(), dtype=np.float32)
-    gstride = gf.size // pipeline.max_splats
-    gf = gf.reshape(pipeline.max_splats, gstride)
+    proj_f = np.frombuffer(b.raster.projected_2d.to_numpy().tobytes(), dtype=np.float32).reshape(pipeline.max_splats, 7)
+    gauss_rec = np.frombuffer(b.primitive.values.to_numpy().tobytes(), dtype=b.primitive.layout.dtype)
 
     ckpt = b.raster.raster_checkpoints.to_numpy()
     ckpt_u = np.frombuffer(ckpt.tobytes(), dtype=np.uint32).reshape(-1, 2)
@@ -189,8 +182,8 @@ def test_forward_checkpoints_reconstruct(backend: str) -> None:
                         gid = int(sorted_ids[s + k])
                         mean2d = proj_f[gid, 0:2]
                         cov2d = proj_f[gid, 2:5]
-                        op = gf[gid, 10]     # opacity logit (Gaussian3D float idx 10)
-                        sh0 = gf[gid, 11:14]  # sh0 DC coeff
+                        op = gauss_rec["opacity"][gid]
+                        sh0 = gauss_rec["sh0"][gid]
                         a = _eval_alpha(px, py, mean2d, cov2d, op)
                         # Alpha-min skip: mirror forward.slang exactly — a splat
                         # below 1/255 does not blend or advance T.

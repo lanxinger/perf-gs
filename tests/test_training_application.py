@@ -80,7 +80,9 @@ def test_a_run_compiles_in_the_session_of_its_own_specialization() -> None:
     opaque = shader_specialization(_parse("--hub", "--splat-kernel", "opaque_core"))
     session = sessions.session_for(opaque)
     assert session is not device.slang_session
-    assert session.desc.compiler_options.defines == shader_defines(opaque)
+    user_defines = {k: v for k, v in session.desc.compiler_options.defines.items()
+                    if k != "TRAINER_METAL_BACKEND"}
+    assert user_defines == shader_defines(opaque)
     assert sessions.session_for(opaque) is session
     device.close()
 
@@ -109,7 +111,7 @@ def test_device_factory_passes_resolved_specialization(monkeypatch) -> None:
 
     assert create_training_device(args) is sentinel
     assert captured == {
-        "backend": "vulkan",
+        "backend": "metal" if __import__("sys").platform == "darwin" else "vulkan",
         # --nsight-debug-names defaults to off unless --capture-external.
         "enable_debug": False,
         "shader_debug_info": False,

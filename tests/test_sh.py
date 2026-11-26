@@ -20,7 +20,7 @@ from trainer.data.dataset import simple_camera
 from trainer.backend.compute.device import create_device
 from trainer.common.sh import pack_features_rest, unpack_features_rest
 
-BACKENDS = ["vulkan", "d3d12"]
+BACKENDS = ["vulkan", "d3d12", "metal"]
 
 
 def _read_features_rest(p: TestPipeline, n: int) -> np.ndarray:
@@ -396,9 +396,9 @@ def test_sh_features_rest_survives_morton_sort(backend: str) -> None:
     p.morton.reorder(world_min, world_max)
     p.device.wait_for_idle()
 
-    floats = np.frombuffer(p.buffers.primitive.values.to_numpy().tobytes(),
-                           dtype=np.float32).reshape(-1, 14)
-    sorted_sh0_r = floats[:n, 11]   # original slot index carried in sh0.r
+    records = np.frombuffer(p.buffers.primitive.values.to_numpy().tobytes(),
+                            dtype=p.buffers.primitive.layout.dtype)
+    sorted_sh0_r = records["sh0"][:n, 0]   # original slot index carried in sh0.r
 
     rest_out = _read_features_rest(p, n)[:, 0]
     arest_out = _read_adam_m(p, n)[:, 0]

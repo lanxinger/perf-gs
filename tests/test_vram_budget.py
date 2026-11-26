@@ -27,7 +27,7 @@ CAMERA = simple_camera(width=16, height=16, eye=(0.0, 0.0, 0.0),
                        target=(0.0, 0.0, 1.0), up=(0.0, 1.0, 0.0), fovy_degrees=60.0)
 
 
-@pytest.fixture(params=["vulkan", "d3d12"])
+@pytest.fixture(params=["vulkan", "d3d12", "metal"])
 def device(request):
     try:
         device = create_device(backend=request.param)

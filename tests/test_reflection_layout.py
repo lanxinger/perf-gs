@@ -19,12 +19,17 @@ import slangpy as spy
 from trainer.backend.memory.buffers import _reflect_types
 from trainer.backend.compute.device import SHADERS_DIR, create_device
 
-BACKENDS = ["vulkan", "d3d12"]
+BACKENDS = ["vulkan", "d3d12", "metal"]
 
-# Frozen byte size per struct — all tightly packed float32 (stride == size):
-# Gaussian3D=14, Projected2DGaussian=7, BlendData=10, AdamState=28 floats.
+# Frozen byte size per struct — scalar layout on Vulkan/D3D12, MSL 16-byte float3 alignment on Metal.
 FROZEN_SIZES = {
     "Gaussian3D": 56,
+    "Projected2DGaussian": 28,
+    "BlendData": 40,
+    "AdamState": 112,
+}
+FROZEN_SIZES_METAL = {
+    "Gaussian3D": 80,
     "Projected2DGaussian": 28,
     "BlendData": 40,
     "AdamState": 112,
@@ -53,7 +58,8 @@ def test_types_module_reflects_all_layout_structs(backend: str) -> None:
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_frozen_struct_sizes(backend: str) -> None:
     m = _types_module(_device(backend))
-    for name, size in FROZEN_SIZES.items():
+    expected = FROZEN_SIZES_METAL if backend == "metal" else FROZEN_SIZES
+    for name, size in expected.items():
         bl = m.layout.find_type_by_name(name).buffer_layout
         assert bl.size == size, f"{name} size {bl.size} != frozen {size}"
         assert bl.stride == size, f"{name} stride {bl.stride} != frozen {size}"
@@ -76,8 +82,12 @@ def test_types_matches_adam_reflection(backend: str) -> None:
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_gaussian_layout_dtype_matches_reflection(backend: str) -> None:
     layout = _reflect_types(_types_module(_device(backend))).gaussian_layout
-    assert layout.float_count == 14
+    assert layout.float_count == (20 if backend == "metal" else 14)
     assert layout.dtype.names == ("mean", "log_scale", "rot_quat", "opacity", "sh0")
     fields = layout.dtype.fields
-    assert [(fields[name][1], fields[name][0].shape) for name in layout.dtype.names] == [
-        (0, (3,)), (12, (3,)), (24, (4,)), (40, ()), (44, (3,))]
+    expected_offsets = (
+        [(0, (3,)), (16, (3,)), (32, (4,)), (48, ()), (64, (3,))]
+        if backend == "metal"
+        else [(0, (3,)), (12, (3,)), (24, (4,)), (40, ()), (44, (3,))]
+    )
+    assert [(fields[name][1], fields[name][0].shape) for name in layout.dtype.names] == expected_offsets

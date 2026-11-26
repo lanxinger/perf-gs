@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
+import threading
 import time
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -178,6 +180,24 @@ class TrainingApplication:
 
     def start_training(self) -> None:
         self.prepare_training_context()
+        if sys.platform == "darwin" and self.viewer is not None and self.viewer.enabled:
+            worker_error: list[BaseException] = []
+            def _train_worker() -> None:
+                try:
+                    self._run_training_and_post(hold_viewer=False)
+                except BaseException as exc:
+                    worker_error.append(exc)
+                    if self.viewer is not None and self.viewer._viewer is not None:
+                        self.viewer._viewer.stop()
+            worker = threading.Thread(target=_train_worker, daemon=True)
+            worker.start()
+            try:
+                self.viewer.run_blocking()
+            finally:
+                worker.join(timeout=5.0)
+            if worker_error:
+                raise worker_error[0]
+            return
         self._run_training_and_post()
 
 
@@ -477,7 +497,8 @@ class TrainingApplication:
 
         if self.error_log is not None:
             self.error_log.attach(self.viewer.state)
-        self.viewer.start()
+        if not (sys.platform == "darwin" and self.viewer.enabled):
+            self.viewer.start()
 
     def _start_profiler(self):
         if self.profiling_enabled:

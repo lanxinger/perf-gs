@@ -20,10 +20,17 @@ def test_sigmoid(math_module: spy.Module) -> None:
     np.testing.assert_allclose(result, expected, atol=1e-6)
 
 
+def _read_mat3(tensor: spy.Tensor) -> np.ndarray:
+    """Read a batch of float3x3 values, respecting MSL's 16-byte float3 row stride on Metal."""
+    raw = np.frombuffer(tensor.storage.to_numpy().tobytes(), dtype=np.float32)
+    row_stride = raw.size // (tensor.shape[0] * 3)
+    return raw.reshape(tensor.shape[0], 3, row_stride)[..., :3]
+
+
 def test_quat_identity(math_module: spy.Module) -> None:
     q = np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32)  # (w, x, y, z) identity
     tensor = spy.Tensor.from_numpy(math_module.device, q)
-    result = math_module.rotMatFromQuat(tensor).to_numpy()[0]
+    result = _read_mat3(math_module.rotMatFromQuat(tensor))[0]
     np.testing.assert_allclose(result, np.eye(3, dtype=np.float32), atol=1e-6)
 
 
@@ -37,14 +44,14 @@ def test_quat_90deg_z(math_module: spy.Module) -> None:
         [0.0,  0.0, 1.0],
     ], dtype=np.float32)
     tensor = spy.Tensor.from_numpy(math_module.device, q)
-    result = math_module.rotMatFromQuat(tensor).to_numpy()[0]
+    result = _read_mat3(math_module.rotMatFromQuat(tensor))[0]
     np.testing.assert_allclose(result, expected, atol=1e-6)
 
 
 def test_cov_identity(math_module: spy.Module) -> None:
     scale = spy.Tensor.from_numpy(math_module.device, np.array([[1.0, 1.0, 1.0]], dtype=np.float32))
     quat = spy.Tensor.from_numpy(math_module.device, np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32))
-    result = math_module.covFromScaleQuat(scale, quat).to_numpy()[0]
+    result = _read_mat3(math_module.covFromScaleQuat(scale, quat))[0]
     np.testing.assert_allclose(result, np.eye(3, dtype=np.float32), atol=1e-6)
 
 
@@ -52,7 +59,7 @@ def test_cov_anisotropic(math_module: spy.Module) -> None:
     scale = spy.Tensor.from_numpy(math_module.device, np.array([[2.0, 1.0, 1.0]], dtype=np.float32))
     quat = spy.Tensor.from_numpy(math_module.device, np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32))
     expected = np.diag([4.0, 1.0, 1.0]).astype(np.float32)
-    result = math_module.covFromScaleQuat(scale, quat).to_numpy()[0]
+    result = _read_mat3(math_module.covFromScaleQuat(scale, quat))[0]
     np.testing.assert_allclose(result, expected, atol=1e-6)
 
 

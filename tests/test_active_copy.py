@@ -12,7 +12,7 @@ from trainer.backend.compute.device import SHADERS_DIR, create_device
 from trainer.backend.compute.gpu import CommandBatch, GpuRuntime
 
 
-@pytest.fixture(params=["vulkan", "d3d12"], scope="module")
+@pytest.fixture(params=["vulkan", "d3d12", "metal"], scope="module")
 def copy_gpu(request):
     try:
         device = create_device(backend=request.param)

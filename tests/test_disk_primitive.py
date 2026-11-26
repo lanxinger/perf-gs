@@ -19,8 +19,9 @@ import pytest
 import slangpy as spy
 
 from trainer.backend.compute.device import SHADERS_DIR, create_device
+from trainer.backend.memory.layout import StructLayout
 
-BACKENDS = ["vulkan", "d3d12"]
+BACKENDS = ["vulkan", "d3d12", "metal"]
 DISK_SHADER = SHADERS_DIR / "primitives" / "disk" / "vertical.slang"
 CHANNELS = 7
 FIXED_SCALE = 65536.0
@@ -77,8 +78,34 @@ def _buffer(device, dtype, shape, data=None):
 
 
 def _primitive_buffer(device, rows):
-    buffer = _buffer(device, _disk_dtype(device), (len(rows),))
-    buffer.copy_from_numpy(np.ascontiguousarray(rows.astype(np.float32).reshape(-1)))
+    disk_type = _disk_dtype(device)
+    layout = StructLayout.of(disk_type)
+    packed = np.zeros(len(rows), dtype=layout.dtype)
+    packed["center"] = rows[:, 0:2]
+    packed["log_radius"] = rows[:, 2]
+    packed["opacity"] = rows[:, 3]
+    packed["color_value"] = rows[:, 4:7]
+    buffer = _buffer(device, disk_type, (len(rows),))
+    buffer.copy_from_numpy(np.ascontiguousarray(packed.view(np.uint8)))
+    return buffer
+
+
+def _read_primitives(device, buffer, count: int) -> np.ndarray:
+    layout = StructLayout.of(_disk_dtype(device))
+    rec = np.frombuffer(buffer.to_numpy().tobytes(), dtype=layout.dtype)[:count]
+    return np.column_stack([rec["center"], rec["log_radius"][:, None],
+                            rec["opacity"][:, None], rec["color_value"]])
+
+
+def _float3_buffer(device, values: np.ndarray):
+    buffer = _buffer(device, "float3", (len(values),))
+    stride = buffer.storage.size // (len(values) * 4)
+    if stride == 4:
+        padded = np.zeros((len(values), 4), dtype=np.float32)
+        padded[:, :3] = values
+        buffer.copy_from_numpy(np.ascontiguousarray(padded))
+    else:
+        buffer.copy_from_numpy(np.ascontiguousarray(values.astype(np.float32)))
     return buffer
 
 
@@ -155,7 +182,7 @@ def test_disk_generic_backward_matches_finite_difference(backend: str) -> None:
     primitives = _primitive_buffer(device, rows)
     pixel_buffer = _buffer(device, "float2", (len(rows),), pixels)
     coverage_buffer = _buffer(device, "float", (len(rows),), coverage_seeds)
-    color_buffer = _buffer(device, "float3", (len(rows),), color_seeds)
+    color_buffer = _float3_buffer(device, color_seeds)
     gradients = _buffer(device, "float", (len(rows) * CHANNELS,))
 
     _kernel(device, "diskBackward").dispatch(
@@ -211,7 +238,7 @@ def test_disk_generic_adam_matches_numpy(backend: str) -> None:
     )
     device.wait_for_idle()
 
-    got = np.frombuffer(primitive_buffer.to_numpy().tobytes(), dtype=np.float32).reshape(-1, CHANNELS)[:count]
+    got = _read_primitives(device, primitive_buffer, count)
     gradients = raw_gradients[:, :count].T.astype(np.float64) / FIXED_SCALE
     expected = rows.astype(np.float64).copy()
     m = 0.1 * gradients

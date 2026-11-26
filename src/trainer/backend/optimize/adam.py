@@ -57,7 +57,21 @@ class AdamOptimizer:
     def reset(self) -> None:
         self.step_count = 0
 
-    def step(self, lrs: AdamLRs, sh_degree: int) -> None:
+    def prepare_step_args(self) -> None:
+        """Compute indirect dispatch args for ``step`` early so Metal can prefetch them
+        on an earlier flush instead of stalling after the backward pass."""
+        commands = self._commands
+        count = self._primitive.active_count
+        args = self._adam.dispatch_args
+        commands.dispatch(self._k.prepare_args, "adam_prepare_args",
+            thread_count=[1, 1, 1],
+            count_buf=count.storage,
+            dispatch_args=args.storage,
+            max_splats=self._capacity)
+        if commands.batch is not None:
+            commands.batch.prefetch_indirect(args)
+
+    def step(self, lrs: AdamLRs, sh_degree: int, *, args_prepared: bool = False) -> None:
         self.step_count += 1
         bc1 = 1.0 - _BETA1 ** float(self.step_count)
         bc2 = 1.0 - _BETA2 ** float(self.step_count)
@@ -65,11 +79,12 @@ class AdamOptimizer:
         count = self._primitive.active_count
         args = self._adam.dispatch_args
 
-        commands.dispatch(self._k.prepare_args, "adam_prepare_args",
-            thread_count=[1, 1, 1],
-            count_buf=count.storage,
-            dispatch_args=args.storage,
-            max_splats=self._capacity)
+        if not args_prepared:
+            commands.dispatch(self._k.prepare_args, "adam_prepare_args",
+                thread_count=[1, 1, 1],
+                count_buf=count.storage,
+                dispatch_args=args.storage,
+                max_splats=self._capacity)
         with commands.marker_group("adam_main"):
             commands.dispatch_indirect(self._k.adam, "adam", args,
                 gaussians=self._primitive.values.storage,

@@ -72,11 +72,14 @@ class SlangSessions:
 
     def __init__(self, device: spy.Device) -> None:
         self._device = device
-        own = device.slang_session.desc.compiler_options.defines
+        own = dict(device.slang_session.desc.compiler_options.defines or {})
+        self._backend_defines = {
+            k: v for k, v in own.items() if k == "TRAINER_METAL_BACKEND"
+        }
         self._sessions = {frozenset(own.items()): device.slang_session}
 
     def session_for(self, spec: ShaderSpecialization) -> spy.SlangSession:
-        defines = shader_defines(spec) or {}
+        defines = {**self._backend_defines, **(shader_defines(spec) or {})}
         key = frozenset(defines.items())
         if key not in self._sessions:
             self._sessions[key] = create_slang_session(self._device, defines)
