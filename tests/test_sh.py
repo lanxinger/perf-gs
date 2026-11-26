@@ -425,10 +425,12 @@ def _force_clone_eta(p: TestPipeline, idx: int = 0) -> None:
     w(b.eta.components["n_low"], 0)
     for key, val in (("max_x", 4.0), ("max_y", 2.0), ("max_z", 0.05)):
         w(b.eta.components[key], int(val * 65536.0))
+    from trainer.backend.memory.buffers import encode_grad_array
     w(b.densification.visibility_count, 1)
-    a = np.zeros(N, dtype=np.int64)
-    a[idx] = int(1.0 * 65536.0)
-    b.densification.grad_mean_2d_mag.copy_from_numpy(a)
+    a = np.zeros(N, dtype=np.float64)
+    a[idx] = 1.0
+    b.densification.grad_mean_2d_mag.copy_from_numpy(
+        encode_grad_array(b.densification.grad_mean_2d_mag, a))
 
 
 @pytest.mark.parametrize("backend", BACKENDS)

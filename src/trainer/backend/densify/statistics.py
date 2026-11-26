@@ -13,6 +13,7 @@ from trainer.backend.memory.buffers import (
     DensificationResources,
     GradientResources,
     PrimitiveStorage,
+    decode_grad_buffer,
 )
 
 FIXED_POINT_SCALE = 65536.0
@@ -54,8 +55,10 @@ class DensifyStatistics:
     def accumulate(self) -> None:
         """Fold this step's screen gradient into the window and reset it."""
         r = self.resources
+        live = self._primitive.cached_count
+        active_n = max(1, min(live, self._capacity)) if live is not None else self._capacity
         self._commands.dispatch(self._k.accumulate, "accumulate_iter",
-            thread_count=[self._capacity, 1, 1],
+            thread_count=[active_n, 1, 1],
             grad_2d_x_iter=self._gradients.screen_x.storage,
             grad_2d_y_iter=self._gradients.screen_y.storage,
             grad_mean_2d_mag_accum=r.grad_mean_2d_mag.storage,
@@ -67,9 +70,8 @@ class DensifyStatistics:
 
     def read(self) -> dict[str, np.ndarray]:
         r = self.resources
-        magnitude = np.frombuffer(r.grad_mean_2d_mag.to_numpy().tobytes(), dtype=np.int64)
         visible = np.frombuffer(r.visibility_count.to_numpy().tobytes(), dtype=np.uint32)
         return {
-            "grad_mean_2d_mag": magnitude.astype(np.float64) / FIXED_POINT_SCALE,
+            "grad_mean_2d_mag": decode_grad_buffer(r.grad_mean_2d_mag),
             "visibility_count": visible.astype(np.int64),
         }

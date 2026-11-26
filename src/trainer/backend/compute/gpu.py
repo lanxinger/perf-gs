@@ -78,6 +78,15 @@ class CommandBatch:
         if self._emulate_indirect:
             self._prefetch_indirect[(id(args_buf.storage), offset)] = args_buf
 
+    def seed_indirect(self, args_buf: spy.NDBuffer, groups: tuple[int, int, int],
+                      offset: int = 0) -> None:
+        """Seed the Metal indirect-dispatch cache with host-known group counts (zero GPU sync)."""
+        if self._emulate_indirect:
+            buf_id = id(args_buf.storage)
+            self._indirect_cache[(buf_id, offset)] = groups
+            self._indirect_cached_buffers.add(buf_id)
+            self._prefetch_indirect.pop((buf_id, offset), None)
+
     def dispatch(self, kernel, marker: str, **kwargs) -> None:
         if self._emulate_indirect:
             self._invalidate_indirect_for_kwargs(kwargs)

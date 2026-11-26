@@ -57,6 +57,18 @@ class AdamOptimizer:
     def reset(self) -> None:
         self.step_count = 0
 
+    def _seed_or_prefetch_args(self, args: spy.NDBuffer) -> None:
+        batch = self._commands.batch
+        if batch is None:
+            return
+        live = self._primitive.cached_count
+        if live is not None:
+            n = min(max(int(live), 0), self._capacity)
+            groups = (n + 255) // 256 if n > 0 else 0
+            batch.seed_indirect(args, (groups, 1, 1))
+        else:
+            batch.prefetch_indirect(args)
+
     def prepare_step_args(self) -> None:
         """Compute indirect dispatch args for ``step`` early so Metal can prefetch them
         on an earlier flush instead of stalling after the backward pass."""
@@ -68,8 +80,7 @@ class AdamOptimizer:
             count_buf=count.storage,
             dispatch_args=args.storage,
             max_splats=self._capacity)
-        if commands.batch is not None:
-            commands.batch.prefetch_indirect(args)
+        self._seed_or_prefetch_args(args)
 
     def step(self, lrs: AdamLRs, sh_degree: int, *, args_prepared: bool = False) -> None:
         self.step_count += 1
@@ -85,6 +96,8 @@ class AdamOptimizer:
                 count_buf=count.storage,
                 dispatch_args=args.storage,
                 max_splats=self._capacity)
+            if self._primitive.cached_count is not None:
+                self._seed_or_prefetch_args(args)
         with commands.marker_group("adam_main"):
             commands.dispatch_indirect(self._k.adam, "adam", args,
                 gaussians=self._primitive.values.storage,

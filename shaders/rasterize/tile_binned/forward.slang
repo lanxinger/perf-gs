@@ -13,7 +13,15 @@
 
 static const uint PIXELS_PER_THREAD = 2u;
 static const uint TILE_ROWS_PER_PASS = TILE_HEIGHT / PIXELS_PER_THREAD;
+#ifdef TRAINER_METAL_BACKEND
+// On Apple Silicon (32-wide SIMD-group), 1 tile per 32-thread workgroup lets all 32 lanes
+// cooperatively preload each 32-splat bucket into threadgroup memory in parallel and exit
+// independently when the tile saturates (~2x faster than un-staged per-splat gathers).
+static const uint TILES_PER_GROUP = 1u;
+groupshared BlendData gs_forward_bucket[RASTER_BUCKET_SIZE];
+#else
 static const uint TILES_PER_GROUP = 2u;
+#endif
 
 [shader("compute")]
 [numthreads(TILE_WIDTH, TILE_ROWS_PER_PASS * TILES_PER_GROUP, 1)]
@@ -59,16 +67,68 @@ void forwardRasterize(
         pixel_in_tile[j] = in_tile.y * TILE_WIDTH + in_tile.x;
     }
 
-    GaussianSource src;
-    src.blend_data = blend_data;
-
     float3 C[PIXELS_PER_THREAD];
     float T[PIXELS_PER_THREAD];
     uint processed[PIXELS_PER_THREAD];
+#ifdef TRAINER_METAL_BACKEND
+    uint lane = gtid.y * TILE_WIDTH + gtid.x;
+    bool active[PIXELS_PER_THREAD];
+    [unroll]
+    for (uint j = 0u; j < PIXELS_PER_THREAD; ++j)
+    {
+        C[j] = float3(0.0);
+        T[j] = 1.0;
+        processed[j] = 0u;
+        active[j] = valid_pixel[j];
+    }
+    Compositor comp;
+    comp.hardness = extinction_hardness;
+    for (uint base = 0u; base < tile_count; base += RASTER_BUCKET_SIZE)
+    {
+        if (!WaveActiveAnyTrue(active[0] || active[1]))
+            break;
+        uint bucket = tile_bucket_base + base / RASTER_BUCKET_SIZE;
+        [unroll]
+        for (uint j = 0u; j < PIXELS_PER_THREAD; ++j)
+        {
+            if (active[j])
+                raster_checkpoints[checkpointIndex(bucket, pixel_in_tile[j])] =
+                    packCheckpoint(T[j], C[j]);
+        }
+        uint load_idx = base + lane;
+        if (load_idx < tile_count)
+            gs_forward_bucket[lane] = blend_data[sorted_gaussian_ids[t_start + load_idx]];
+        GroupMemoryBarrierWithGroupSync();
+
+        uint end_k = min(RASTER_BUCKET_SIZE, tile_count - base);
+        for (uint k = 0u; k < end_k; ++k)
+        {
+            GaussianPrimitive prim = GaussianPrimitive.make(gs_forward_bucket[k]);
+            [unroll]
+            for (uint j = 0u; j < PIXELS_PER_THREAD; ++j)
+            {
+                if (!active[j])
+                    continue;
+                float alpha = min(prim.coverage(pixel_center[j]), BLEND_ALPHA_MAX);
+                if (alpha >= BLEND_ALPHA_MIN)
+                {
+                    C[j] += prim.color() * comp.weight(alpha) * T[j];
+                    T[j] *= comp.transmittance(alpha);
+                    processed[j] = base + k + 1u;
+                    active[j] = T[j] >= BLEND_T_EARLY_BREAK;
+                }
+            }
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+#else
+    GaussianSource src;
+    src.blend_data = blend_data;
     blendForward<GaussianSource, PIXELS_PER_THREAD>(
         src, t_start, tile_count, pixel_center, valid_pixel,
         pixel_in_tile, tile_bucket_base, sorted_gaussian_ids,
         raster_checkpoints, extinction_hardness, C, T, processed);
+#endif
 
     [unroll]
     for (uint j = 0u; j < PIXELS_PER_THREAD; ++j)

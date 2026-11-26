@@ -18,13 +18,13 @@ void shBackward(
     StructuredBuffer<uint> features_rest,
     RWStructuredBuffer<uint> features_rest_grad,
     // Accumulated color gradient (read; clamped channels zeroed for the DC term).
-    RWStructuredBuffer<int64_t> grad_color_r,
-    RWStructuredBuffer<int64_t> grad_color_g,
-    RWStructuredBuffer<int64_t> grad_color_b,
+    GradBuffer grad_color_r,
+    GradBuffer grad_color_g,
+    GradBuffer grad_color_b,
     // Adds the direction->mean term after projection_backward's write (single writer per gid).
-    RWStructuredBuffer<int64_t> grad_mean_x,
-    RWStructuredBuffer<int64_t> grad_mean_y,
-    RWStructuredBuffer<int64_t> grad_mean_z,
+    GradBuffer grad_mean_x,
+    GradBuffer grad_mean_y,
+    GradBuffer grad_mean_z,
     StructuredBuffer<uint> cluster_visible,
     uniform uint active_sh_degree,
     uniform uint rest_floats,
@@ -40,9 +40,9 @@ void shBackward(
     float3 cam = cameraCenterWorld(camera[0].view_matrix);
     int deg = int(active_sh_degree);
 
-    float3 gaussianColor = float3(fromFixed(grad_color_r[gid]),
-                       fromFixed(grad_color_g[gid]),
-                       fromFixed(grad_color_b[gid]));
+    float3 gaussianColor = float3(fromGrad(grad_color_r[gid]),
+                       fromGrad(grad_color_g[gid]),
+                       fromGrad(grad_color_b[gid]));
 
     // Higher-band gradients packed fp16, 2 scalars per uint, into features_rest_grad (sole writer).
     uint fu = halfFeatUints(rest_floats);
@@ -94,11 +94,11 @@ void shBackward(
     }
 
     // DC gradient is grad_color for unclamped channels; zero the clamped ones.
-    if (mask.x == 0.0) grad_color_r[gid] = int64_t(0);
-    if (mask.y == 0.0) grad_color_g[gid] = int64_t(0);
-    if (mask.z == 0.0) grad_color_b[gid] = int64_t(0);
+    if (mask.x == 0.0) grad_color_r[gid] = GradScalar(0);
+    if (mask.y == 0.0) grad_color_g[gid] = GradScalar(0);
+    if (mask.z == 0.0) grad_color_b[gid] = GradScalar(0);
 
-    grad_mean_x[gid] = grad_mean_x[gid] + toFixed(dp_mean.d.x);
-    grad_mean_y[gid] = grad_mean_y[gid] + toFixed(dp_mean.d.y);
-    grad_mean_z[gid] = grad_mean_z[gid] + toFixed(dp_mean.d.z);
+    grad_mean_x[gid] = grad_mean_x[gid] + toGrad(dp_mean.d.x);
+    grad_mean_y[gid] = grad_mean_y[gid] + toGrad(dp_mean.d.y);
+    grad_mean_z[gid] = grad_mean_z[gid] + toGrad(dp_mean.d.z);
 }

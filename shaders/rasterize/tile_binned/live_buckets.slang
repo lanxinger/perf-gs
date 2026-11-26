@@ -18,7 +18,7 @@ groupshared uint gs_tile_max;
 void tileMaxProcessed(
     uint3 gid: SV_GroupID,
     uint3 gtid: SV_GroupThreadID,
-    RWTexture2D<uint> gaussian_count_per_pixel,
+    Texture2D<uint> gaussian_count_per_pixel,
     RWStructuredBuffer<uint> live_bucket_count,
     // STBN mask, runtime-gated (not STBN_ENABLED) so the STBN_ENABLED=0 reference sees the same buckets.
     StructuredBuffer<uint> stbn_table,

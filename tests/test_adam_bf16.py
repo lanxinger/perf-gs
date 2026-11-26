@@ -107,7 +107,8 @@ def test_stochastic_rounding_keeps_the_second_moment_moving(backend) -> None:
     b = pipeline.buffers
     start = np.full(16 * 14, np.float32(0.25).view(np.uint32), np.uint32)  # m=0, v=0.25
     b.adam.state.storage.copy_from_numpy(start)
-    gradient = np.full(16, 1 << 16, np.int64)  # 1.0 in fixed point
+    from trainer.backend.memory.buffers import encode_grad_array
+    gradient = encode_grad_array(b.gradients.params["mean_x"], np.ones(16, dtype=np.float64))
     steps = 300
     for step in range(1, steps + 1):
         for name in GRAD_SCALAR_COMPONENTS:

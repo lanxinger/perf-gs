@@ -193,3 +193,4 @@ class SimpleDensifier:
             thread_count=[1, 1, 1],
             src=live_count.storage,
             dst=primitive.active_count.storage)
+        primitive.cached_count = None

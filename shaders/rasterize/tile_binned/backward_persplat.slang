@@ -25,9 +25,17 @@ uint bucketWaveLane(uint wave_lane, uint bucket_lane)
 static const float ALPHA_MAX = 0.99;
 static const float ALPHA_MIN_TRACK = 1.0 / 255.0;
 
-// Equivalent gradients: 0 = fused affine-map scan (blendPrefixExclusive), 1 = separate wave scans for A/B.
+// Equivalent gradients:
+//   0 = fused affine-map scan (blendPrefixExclusive, fast on Vulkan/D3D12 SHFL),
+//   1 = separate wave scans for T and rgb C_in_front,
+//   2 = hardware WavePrefixProduct(T) + scalar WavePrefixSum(dot(dLdC, c) * alpha * T),
+//       fastest on Apple Silicon Metal (2 hardware SIMD prefix ops vs 20 cross-lane shuffles).
 #ifndef BACKWARD_BLEND_SCAN_MODE
+#ifdef TRAINER_METAL_BACKEND
+#define BACKWARD_BLEND_SCAN_MODE 2
+#else
 #define BACKWARD_BLEND_SCAN_MODE 0
+#endif
 #endif
 
 #if BACKWARD_BLEND_SCAN_MODE != 0
@@ -51,6 +59,18 @@ float3 bucketPrefixSum(float3 x, uint wave_lane)
     {
         bool upper = wave_lane >= RASTER_BUCKET_SIZE;
         float3 upper_prefix = WavePrefixSum(upper ? x : float3(0.0));
+        return upper ? upper_prefix : prefix;
+    }
+    return prefix;
+}
+
+float bucketPrefixSumScalar(float x, uint wave_lane)
+{
+    float prefix = WavePrefixSum(x);
+    if (trainerWaveLaneCount() > RASTER_BUCKET_SIZE)
+    {
+        bool upper = wave_lane >= RASTER_BUCKET_SIZE;
+        float upper_prefix = WavePrefixSum(upper ? x : 0.0);
         return upper ? upper_prefix : prefix;
     }
     return prefix;
@@ -156,22 +176,22 @@ void backwardRasterizePerSplat(
     StructuredBuffer<uint> bucket_offsets,
     StructuredBuffer<uint2> raster_checkpoints,
     StructuredBuffer<CameraData> camera,
-    RWTexture2D<float4> output_image,
-    RWTexture2D<uint> gaussian_count_per_pixel,
-    RWTexture2D<float4> dL_dC_texture,
+    Texture2D<float4> output_image,
+    Texture2D<uint> gaussian_count_per_pixel,
+    Texture2D<float4> dL_dC_texture,
     // Tile-summed BlendData seeds for projection_backward.slang; the color grads below are final.
-    AtomicI64Buffer grad_mean2d_x,
-    AtomicI64Buffer grad_mean2d_y,
-    AtomicI64Buffer grad_conic_a,
-    AtomicI64Buffer grad_conic_b,
-    AtomicI64Buffer grad_conic_c,
-    AtomicI64Buffer grad_amplitude,
-    AtomicI64Buffer grad_opacity,   // opaque_core's direct falloff term only
-    AtomicI64Buffer grad_color_r,
-    AtomicI64Buffer grad_color_g,
-    AtomicI64Buffer grad_color_b,
-    AtomicI64Buffer grad_2d_x_iter,
-    AtomicI64Buffer grad_2d_y_iter,
+    AtomicGradBuffer grad_mean2d_x,
+    AtomicGradBuffer grad_mean2d_y,
+    AtomicGradBuffer grad_conic_a,
+    AtomicGradBuffer grad_conic_b,
+    AtomicGradBuffer grad_conic_c,
+    AtomicGradBuffer grad_amplitude,
+    AtomicGradBuffer grad_opacity,   // opaque_core's direct falloff term only
+    AtomicGradBuffer grad_color_r,
+    AtomicGradBuffer grad_color_g,
+    AtomicGradBuffer grad_color_b,
+    AtomicGradBuffer grad_2d_x_iter,
+    AtomicGradBuffer grad_2d_y_iter,
     // Densify-window sum of each splat's blend weight alpha * T; written only when track_blend_weight != 0.
     AtomicI64Buffer blend_weight_accum,
     uniform uint track_blend_weight,
@@ -392,6 +412,12 @@ void backwardRasterizePerSplat(
             float dLdC_contrib = dLdC_weight * T_i;
             // dot(dL_dC, C_in_front_excl(i)) = dot(dL_dC, C_checkpoint) + prefixsum.
             float dLdC_C_in_front = dot(dL_dC, C_checkpoint) + T_checkpoint * dLdC_C_in_front_prefix;   // exclusive
+#elif BACKWARD_BLEND_SCAN_MODE == 2
+            float T_prefix = bucketPrefixProduct(T_step, wave_lane);
+            float T_i     = T_checkpoint * T_prefix;
+            float alpha_T = comp.weight(alpha) * T_i;          // this splat's blend weight
+            float dLdC_contrib = dot(dL_dC, c_i) * alpha_T;
+            float dLdC_C_in_front = dot(dL_dC, C_checkpoint) + bucketPrefixSumScalar(dLdC_contrib, wave_lane);
 #else
             float T_prefix = bucketPrefixProduct(T_step, wave_lane);
             float T_i     = T_checkpoint * T_prefix;
@@ -413,7 +439,7 @@ void backwardRasterizePerSplat(
                 acc_color += dL_dC * alpha_T;
                 acc_weight += alpha_T;
 
-#if BACKWARD_BLEND_SCAN_MODE == 0
+#if BACKWARD_BLEND_SCAN_MODE == 0 || BACKWARD_BLEND_SCAN_MODE == 2
                 // dot(dL_dC, C_behind) with C_behind = C_total - C_in_front(i) - c_i * alpha_i * T_i.
                 float dLdC_Cbehind = dot(dL_dC, C_total) - dLdC_C_in_front - dLdC_contrib;
                 // The compositor owns the alpha-over vs hardened-extinction math.
@@ -471,22 +497,22 @@ void backwardRasterizePerSplat(
             }
 
             // projection_backward.slang applies J^T once per gaussian to these tile sums.
-            atomicAddI64(grad_mean2d_x, g_idx, toFixed(acc_mean2d.x));
-            atomicAddI64(grad_mean2d_y, g_idx, toFixed(acc_mean2d.y));
-            atomicAddI64(grad_conic_a, g_idx, toFixed(acc_conic.x));
-            atomicAddI64(grad_conic_b, g_idx, toFixed(acc_conic.y));
-            atomicAddI64(grad_conic_c, g_idx, toFixed(acc_conic.z));
-            atomicAddI64(grad_amplitude, g_idx, toFixed(acc_amplitude));
+            atomicAddGrad(grad_mean2d_x, g_idx, acc_mean2d.x);
+            atomicAddGrad(grad_mean2d_y, g_idx, acc_mean2d.y);
+            atomicAddGrad(grad_conic_a, g_idx, acc_conic.x);
+            atomicAddGrad(grad_conic_b, g_idx, acc_conic.y);
+            atomicAddGrad(grad_conic_c, g_idx, acc_conic.z);
+            atomicAddGrad(grad_amplitude, g_idx, acc_amplitude);
 #if SPLAT_KERNEL == 3
-            atomicAddI64(grad_opacity, g_idx, toFixed(acc_opacity));
+            atomicAddGrad(grad_opacity, g_idx, acc_opacity);
 #endif
-            atomicAddI64(grad_color_r, g_idx, toFixed(acc_color.x));
-            atomicAddI64(grad_color_g, g_idx, toFixed(acc_color.y));
-            atomicAddI64(grad_color_b, g_idx, toFixed(acc_color.z));
+            atomicAddGrad(grad_color_r, g_idx, acc_color.x);
+            atomicAddGrad(grad_color_g, g_idx, acc_color.y);
+            atomicAddGrad(grad_color_b, g_idx, acc_color.z);
             if (track_screen_grad != 0u)
             {
-                atomicAddI64(grad_2d_x_iter, g_idx, toFixed(acc_absx));
-                atomicAddI64(grad_2d_y_iter, g_idx, toFixed(acc_absy));
+                atomicAddGrad(grad_2d_x_iter, g_idx, acc_absx);
+                atomicAddGrad(grad_2d_y_iter, g_idx, acc_absy);
             }
         }
 
@@ -510,21 +536,21 @@ void backwardRasterizePerBucket(
     StructuredBuffer<uint> live_bucket_total,    // [1]: number of live buckets
     StructuredBuffer<uint2> raster_checkpoints,
     StructuredBuffer<CameraData> camera,
-    RWTexture2D<float4> output_image,
-    RWTexture2D<uint> gaussian_count_per_pixel,
-    RWTexture2D<float4> dL_dC_texture,
-    AtomicI64Buffer grad_mean2d_x,
-    AtomicI64Buffer grad_mean2d_y,
-    AtomicI64Buffer grad_conic_a,
-    AtomicI64Buffer grad_conic_b,
-    AtomicI64Buffer grad_conic_c,
-    AtomicI64Buffer grad_amplitude,
-    AtomicI64Buffer grad_opacity,
-    AtomicI64Buffer grad_color_r,
-    AtomicI64Buffer grad_color_g,
-    AtomicI64Buffer grad_color_b,
-    AtomicI64Buffer grad_2d_x_iter,
-    AtomicI64Buffer grad_2d_y_iter,
+    Texture2D<float4> output_image,
+    Texture2D<uint> gaussian_count_per_pixel,
+    Texture2D<float4> dL_dC_texture,
+    AtomicGradBuffer grad_mean2d_x,
+    AtomicGradBuffer grad_mean2d_y,
+    AtomicGradBuffer grad_conic_a,
+    AtomicGradBuffer grad_conic_b,
+    AtomicGradBuffer grad_conic_c,
+    AtomicGradBuffer grad_amplitude,
+    AtomicGradBuffer grad_opacity,
+    AtomicGradBuffer grad_color_r,
+    AtomicGradBuffer grad_color_g,
+    AtomicGradBuffer grad_color_b,
+    AtomicGradBuffer grad_2d_x_iter,
+    AtomicGradBuffer grad_2d_y_iter,
     AtomicI64Buffer blend_weight_accum,
     uniform uint track_blend_weight,
     uniform uint track_screen_grad,
@@ -740,6 +766,9 @@ void backwardRasterizePerBucket(
 #if BACKWARD_BLEND_SCAN_MODE == 0
             float dLdC_contrib = dLdC_weight[j] * T_i;
             float dLdC_C_in_front = dLdC_C_checkpoint[j] + T_checkpoint[j] * dLdC_C_in_front_prefix[j];
+#elif BACKWARD_BLEND_SCAN_MODE == 2
+            float dLdC_contrib = dLdC_weight[j] * T_i;
+            float dLdC_C_in_front = dLdC_C_checkpoint[j] + bucketPrefixSumScalar(dLdC_contrib, wave_lane);
 #else
             float3 contrib = c_i * alpha_T;
             float3 C_in_front = C_checkpoint[j] + bucketPrefixSum(contrib, wave_lane);
@@ -752,7 +781,7 @@ void backwardRasterizePerBucket(
                 acc_color += dLdC4[j].rgb * alpha_T;
                 acc_weight += alpha_T;
 
-#if BACKWARD_BLEND_SCAN_MODE == 0
+#if BACKWARD_BLEND_SCAN_MODE == 0 || BACKWARD_BLEND_SCAN_MODE == 2
                 float dLdC_Cbehind = dot(dLdC4[j].rgb, C_total[j].rgb) - dLdC_C_in_front - dLdC_contrib;
                 float dL_dalpha = comp.coverageGrad(alpha[j], dLdC_c[j], T_i, dLdC_Cbehind, dLdC4[j].a,
                                                     T_final);
@@ -802,22 +831,22 @@ void backwardRasterizePerBucket(
             float coverage = float(TILE_AREA) / float(max(visit_count, 1u));
             atomicAddI64(blend_weight_accum, g_idx, toFixed(acc_weight * coverage));
         }
-        atomicAddI64(grad_mean2d_x, g_idx, toFixed(acc_mean2d.x));
-        atomicAddI64(grad_mean2d_y, g_idx, toFixed(acc_mean2d.y));
-        atomicAddI64(grad_conic_a, g_idx, toFixed(acc_conic.x));
-        atomicAddI64(grad_conic_b, g_idx, toFixed(acc_conic.y));
-        atomicAddI64(grad_conic_c, g_idx, toFixed(acc_conic.z));
-        atomicAddI64(grad_amplitude, g_idx, toFixed(acc_amplitude));
+        atomicAddGrad(grad_mean2d_x, g_idx, acc_mean2d.x);
+        atomicAddGrad(grad_mean2d_y, g_idx, acc_mean2d.y);
+        atomicAddGrad(grad_conic_a, g_idx, acc_conic.x);
+        atomicAddGrad(grad_conic_b, g_idx, acc_conic.y);
+        atomicAddGrad(grad_conic_c, g_idx, acc_conic.z);
+        atomicAddGrad(grad_amplitude, g_idx, acc_amplitude);
 #if SPLAT_KERNEL == 3
-        atomicAddI64(grad_opacity, g_idx, toFixed(acc_opacity));
+        atomicAddGrad(grad_opacity, g_idx, acc_opacity);
 #endif
-        atomicAddI64(grad_color_r, g_idx, toFixed(acc_color.x));
-        atomicAddI64(grad_color_g, g_idx, toFixed(acc_color.y));
-        atomicAddI64(grad_color_b, g_idx, toFixed(acc_color.z));
+        atomicAddGrad(grad_color_r, g_idx, acc_color.x);
+        atomicAddGrad(grad_color_g, g_idx, acc_color.y);
+        atomicAddGrad(grad_color_b, g_idx, acc_color.z);
         if (track_screen_grad != 0u)
         {
-            atomicAddI64(grad_2d_x_iter, g_idx, toFixed(acc_absx));
-            atomicAddI64(grad_2d_y_iter, g_idx, toFixed(acc_absy));
+            atomicAddGrad(grad_2d_x_iter, g_idx, acc_absx);
+            atomicAddGrad(grad_2d_y_iter, g_idx, acc_absy);
         }
     }
 }

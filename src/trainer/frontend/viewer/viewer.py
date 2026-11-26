@@ -561,6 +561,7 @@ class Viewer:
             _copy_splats(encoder, src.primitive.filter_3d.storage,
                          dst.primitive.filter_3d.storage, count, src.max_splats)
         encoder.upload_buffer_data(dst.primitive.active_count.storage, 0, np.array([count], dtype=np.uint32))
+        dst.primitive.cached_count = int(count)
         self.runtime.submit(batch)
         self._pipeline.rasterizer.natural_vignetting = train_pipeline.rasterizer.natural_vignetting
         self._pipeline.set_active_sh_degree(train_pipeline.active_sh_degree)

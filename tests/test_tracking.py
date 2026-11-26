@@ -186,5 +186,6 @@ def test_untracked_step_leaves_the_screen_gradient_alone(backend: str) -> None:
     untracked = pipeline.densify_stats.read()
     for name in ("visibility_count", "grad_mean_2d_mag"):
         np.testing.assert_array_equal(untracked[name], tracked[name], err_msg=name)
+    from trainer.backend.memory.buffers import decode_grad_buffer
     for buffer in (pipeline.buffers.gradients.screen_x, pipeline.buffers.gradients.screen_y):
-        assert not np.frombuffer(buffer.to_numpy().tobytes(), dtype=np.int64).any()
+        assert not decode_grad_buffer(buffer).any()

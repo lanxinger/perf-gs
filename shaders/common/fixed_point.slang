@@ -28,6 +28,23 @@ void atomicAddI64(RWByteAddressBuffer buf, uint index, int64_t delta)
     if (hi_delta != 0u)
         buf.InterlockedAdd(index * 8u + 4u, hi_delta);
 }
+
+// Apple Silicon Metal 3.0+ natively supports hardware atomic_fetch_add on float.
+// Using fp32 gradient accumulators halves gradient memory/bandwidth and avoids
+// emulated two-word 64-bit integer atomics.
+typedef float GradScalar;
+typedef RWStructuredBuffer<float> GradBuffer;
+typedef StructuredBuffer<float> ReadGradBuffer;
+typedef RWStructuredBuffer<float> AtomicGradBuffer;
+
+GradScalar toGrad(float value) { return value; }
+float fromGrad(GradScalar value) { return value; }
+
+void atomicAddGrad(AtomicGradBuffer buf, uint index, float delta)
+{
+    if (delta != 0.0)
+        InterlockedAdd(buf[index], delta);
+}
 #else
 typedef RWStructuredBuffer<int64_t> AtomicI64Buffer;
 
@@ -35,6 +52,25 @@ void atomicAddI64(RWStructuredBuffer<int64_t> buf, uint index, int64_t delta)
 {
     InterlockedAdd(buf[index], delta);
 }
+
+typedef int64_t GradScalar;
+typedef RWStructuredBuffer<int64_t> GradBuffer;
+typedef StructuredBuffer<int64_t> ReadGradBuffer;
+typedef RWStructuredBuffer<int64_t> AtomicGradBuffer;
+
+GradScalar toGrad(float value) { return toFixed(value); }
+float fromGrad(GradScalar value) { return fromFixed(value); }
+
+void atomicAddGrad(AtomicGradBuffer buf, uint index, float delta)
+{
+    InterlockedAdd(buf[index], toFixed(delta));
+}
 #endif
+
+// Reflected by host allocation to size gradient buffers (4 B on Metal, 8 B on Vulkan/D3D12).
+struct GradAccum
+{
+    GradScalar value;
+};
 
 #endif // TRAINER_FIXED_POINT_SLANG

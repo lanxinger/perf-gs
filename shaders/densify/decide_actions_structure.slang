@@ -29,7 +29,7 @@ void decideActionsStructure(
     StructuredBuffer<uint> eta_max_x,
     StructuredBuffer<uint> eta_max_y,
     StructuredBuffer<uint> eta_max_z,
-    StructuredBuffer<int64_t> grad_mean_2d_mag_accum,
+    ReadGradBuffer grad_mean_2d_mag_accum,
     StructuredBuffer<uint> visibility_count_accum,
     StructuredBuffer<int64_t> blend_weight_accum,
     RWStructuredBuffer<uint> action,
@@ -66,7 +66,7 @@ void decideActionsStructure(
     uint vis = visibility_count_accum[gaussian_idx];
     float avg_grad = 0.0;
     if (vis > 0u)
-        avg_grad = fromFixed(grad_mean_2d_mag_accum[gaussian_idx]) / float(vis);
+        avg_grad = fromGrad(grad_mean_2d_mag_accum[gaussian_idx]) / float(vis);
     bool is_grad_high = avg_grad >= grad_threshold_internal;
 
     Gaussian3D g = gaussians[gaussian_idx];

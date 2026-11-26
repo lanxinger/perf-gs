@@ -31,9 +31,11 @@ class Regularizer:
         config = self.config
         if config.opacity_weight <= 0 and config.scale_weight <= 0:
             return
+        live = self._primitive.cached_count
+        active_n = max(1, min(live, self._capacity)) if live is not None else self._capacity
         grads = self._gradients.params
         self._commands.dispatch(self._k.regularization, "regularization",
-            thread_count=[self._capacity, 1, 1],
+            thread_count=[active_n, 1, 1],
             gaussians=self._primitive.values.storage,
             num_gaussians_counter=self._primitive.active_count.storage,
             grad_opacity=grads["opacity"].storage,

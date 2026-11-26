@@ -273,6 +273,7 @@ class StructureDensifier:
             commands.dispatch(k.snapshot_count, "densify_snapshot",
                 thread_count=[1, 1, 1], src=live_count.storage,
                 dst=primitive.active_count.storage)
+            primitive.cached_count = None
 
             # SADGS caps every survivor's opacity: inverse_sigmoid(min(opacity, cap)).
             if cfg.opacity_cap and cfg.opacity_cap > 0.0:
@@ -289,8 +290,8 @@ class StructureDensifier:
         eta_max = np.maximum(u32(eta["max_x"]), np.maximum(u32(eta["max_y"]), u32(eta["max_z"])))
         eta_max = eta_max.astype(np.float64) / FIXED_POINT_SCALE
         visible = u32(self._densification_resources.visibility_count).astype(np.float64)
-        grad = np.frombuffer(self._densification_resources.grad_mean_2d_mag.storage.to_numpy().tobytes(),
-                             dtype=np.int64)[:pre_count].astype(np.float64) / FIXED_POINT_SCALE
+        from trainer.backend.memory.buffers import decode_grad_buffer
+        grad = decode_grad_buffer(self._densification_resources.grad_mean_2d_mag, pre_count)
         seen = n_total > 0
         if not seen.any():
             return

@@ -112,8 +112,11 @@ class Rasterizer:
                 tile_end=r.tile_end.storage,
                 num_tiles=num_tiles)
 
+        live = primitive.cached_count
+        active_n = max(1, min(live, capacity)) if live is not None else capacity
+
         if config.cluster_cull:
-            num_clusters = (capacity + CLUSTER_SIZE - 1) // CLUSTER_SIZE
+            num_clusters = (active_n + CLUSTER_SIZE - 1) // CLUSTER_SIZE
             with commands.marker_group("cluster_cull"):
                 commands.dispatch(k.build_cluster_aabb, "build_cluster_aabb",
                     thread_count=[num_clusters * CLUSTER_SIZE, 1, 1],
@@ -133,7 +136,7 @@ class Rasterizer:
 
         with commands.marker_group("bin_count"):
             commands.dispatch(k.bin_count, "bin_count",
-                thread_count=[capacity, 1, 1],
+                thread_count=[active_n, 1, 1],
                 gaussians=primitive.values.storage,
                 num_gaussians_counter=primitive.active_count.storage,
                 camera=self.camera_buffer,
@@ -153,7 +156,7 @@ class Rasterizer:
         if self._sh is not None:
             with commands.marker_group("sh_forward"):
                 commands.dispatch(k.sh_forward, "sh_forward",
-                    thread_count=[capacity, 1, 1],
+                    thread_count=[active_n, 1, 1],
                     gaussians=primitive.values.storage,
                     num_gaussians_counter=primitive.active_count.storage,
                     camera=self.camera_buffer,
@@ -165,9 +168,10 @@ class Rasterizer:
                     max_splats=capacity)
 
         with commands.marker_group("depth_sort"):
-            _, _, depth_sorted_ids = self._depth_sort.sort(r.depth_count, key_bits=32)
+            _, _, depth_sorted_ids = self._depth_sort.sort(
+                r.depth_count, key_bits=32, known_count=live)
             commands.dispatch(k.gather_tile_counts, "gather_tile_counts",
-                thread_count=[capacity, 1, 1],
+                thread_count=[active_n, 1, 1],
                 depth_sorted_ids=depth_sorted_ids.storage,
                 depth_count=r.depth_count.storage,
                 tile_count_per_gaussian=r.tile_count_per_gaussian.storage,
@@ -175,13 +179,16 @@ class Rasterizer:
                 max_splats=capacity)
 
         with commands.marker_group("scan_tile_offsets"):
-            self._scan.scan(n=capacity, in_buf=r.tile_count_by_depth,
+            self._scan.scan(n=active_n, in_buf=r.tile_count_by_depth,
                             out_buf=r.pair_offset_by_depth)
 
         pairs = self._sort.resources
         pair_count = self._scan.resources.total
         with commands.marker_group("bin_emit"):
             args = r.depth_sort.dispatch_args  # depth sort is finished for this frame
+            # Prepare tile-sort dispatch args before bin_emit so Metal prefetches both
+            # pair_count-derived indirect buffers in a single flush.
+            self._sort.prepare_dispatch(pair_count)
             commands.dispatch(k.prepare_pair_args, "pair_dispatch_args", thread_count=[1, 1, 1],
                 count_buf=pair_count.storage, dispatch_args=args.storage,
                 record_words=1, max_splats=pairs.capacity)
@@ -199,7 +206,8 @@ class Rasterizer:
         with commands.marker_group("radix_sort"):
             # Pairs arrive front to back, so the stable sort only needs the tile index's bits.
             tile_bits = max(1, (num_tiles - 1).bit_length())
-            sorted_tiles, _, sorted_values = self._sort.sort(pair_count, key_bits=tile_bits)
+            sorted_tiles, _, sorted_values = self._sort.sort(
+                pair_count, key_bits=tile_bits, args_prepared=True)
 
         with commands.marker_group("identify_tile_ranges"):
             commands.dispatch_indirect(k.identify_tile_ranges, "identify_tile_ranges", args,
@@ -221,10 +229,13 @@ class Rasterizer:
                             out_buf=r.bucket_offsets, total_buf=r.bucket_offset_total)
 
         with commands.marker_group("rasterize"):
-            # One warp per tile, two pixels per lane, two vertically adjacent tiles per workgroup.
+            # One warp per tile, two pixels per lane; Metal uses 1 tile/workgroup for
+            # cooperative 32-splat bucket preloads, Vulkan/D3D12 pack 2 tiles/workgroup.
+            fwd_y = (self.num_tiles_y * (TILE_HEIGHT // 2)
+                     if commands._emulate_indirect
+                     else (self.num_tiles_y + 1) // 2 * TILE_HEIGHT)
             commands.dispatch(k.forward, "forward",
-                thread_count=[self.num_tiles_x * TILE_WIDTH,
-                              (self.num_tiles_y + 1) // 2 * TILE_HEIGHT, 1],
+                thread_count=[self.num_tiles_x * TILE_WIDTH, fwd_y, 1],
                 blend_data=r.blend_data.storage,
                 tile_start=r.tile_start.storage,
                 tile_end=r.tile_end.storage,

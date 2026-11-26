@@ -7,7 +7,7 @@ from __future__ import annotations
 import numpy as np
 
 from trainer.backend.compute.execution import TILE_HEIGHT, TILE_WIDTH
-from trainer.backend.memory.buffers import GRAD_SCALAR_COMPONENTS
+from trainer.backend.memory.buffers import GRAD_SCALAR_COMPONENTS, decode_grad_buffer
 from trainer.backend.render.pipeline import TrainingPipeline, default_sort_pairs
 from trainer.config.config import (
     AdamLRs,
@@ -83,14 +83,10 @@ class TestPipeline(TrainingPipeline):
         self.regularizer.record()
 
     def read_gradients(self) -> dict[str, np.ndarray]:
-        """The 14 SoA int64 fixed-point grad buffers as float64."""
+        """The 14 SoA grad buffers as float64."""
         n = self.primitives.count()
-        out: dict[str, np.ndarray] = {}
-        for name in GRAD_SCALAR_COMPONENTS:
-            raw = self.buffers.gradients.params[name].to_numpy()
-            ints = np.frombuffer(raw.tobytes(), dtype=np.int64)[:n]
-            out[name] = ints.astype(np.float64) / 65536.0
-        return out
+        return {name: decode_grad_buffer(self.buffers.gradients.params[name], n)
+                for name in GRAD_SCALAR_COMPONENTS}
 
     def read_loss(self) -> float:
         """CPU L1 between output and target, matching l1_l2_loss.slang (both sRGB)."""
