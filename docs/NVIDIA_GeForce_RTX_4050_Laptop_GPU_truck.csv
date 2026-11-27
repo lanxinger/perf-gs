@@ -1,0 +1,4 @@
+gpu,dataset,scene,preset,seed,steps,downsample,width,height,train_views,test_views,train_wall_s,psnr_srgb,ssim_srgb,final_splats,vram_usage_bytes
+NVIDIA GeForce RTX 4050 Laptop GPU,Tanks and Temples,truck,ultrafast,42,3000,2,978,545,219,32,73.10793447494507,26.860846696297102,0.9002934477364555,1388476,3811360768
+NVIDIA GeForce RTX 4050 Laptop GPU,Tanks and Temples,truck,balanced,42,3000,2,978,545,219,32,109.13545298576355,27.03932734305667,0.9075104013585114,1815236,2791882752
+NVIDIA GeForce RTX 4050 Laptop GPU,Tanks and Temples,truck,quality,42,3500,2,978,545,219,32,128.07710456848145,27.412376164661747,0.912019892676107,1358099,4939759616

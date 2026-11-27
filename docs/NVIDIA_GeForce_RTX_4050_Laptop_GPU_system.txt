@@ -1,0 +1,12 @@
+Trainer commit: 26a4ca2d81ab8495848cd9f11e2f537049f2946a
+Trainer source files SHA-256: d60e85a14ddc6939463b2c64cac8123cd30122ed6f74b25fdd92289e8ac012f3
+System: Dell Inc. XPS 14 9440
+CPU: Intel(R) Core(TM) Ultra 7 155H (16 cores)
+OS: Microsoft Windows 11 Enterprise 10.0.26100
+Visible system RAM (KiB): 66538200
+name, driver_version, memory.total [MiB]
+NVIDIA GeForce RTX 4050 Laptop GPU, 610.74, 6141 MiB
+Python 3.13.2 (tags/v3.13.2:4f8bb39, Feb  4 2025, 15:23:48) [MSC v.1942 64 bit (AMD64)]
+slangpy 0.42.0
+torch 2.10.0+cu128
+torchvision 0.25.0+cu128

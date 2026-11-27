@@ -4,11 +4,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#ffffff">
-  <meta name="description" content="PERF-GS trains 3D Gaussian Splatting scenes in seconds. Explore real-time training, held-out reconstructions, and measured RTX 4090 and 4080 results.">
-  <meta property="og:title" content="PERF-GS - 3D Gaussian Splatting in 10 seconds">
+  <meta name="description" content="PERF-GS trains 3D Gaussian Splatting scenes in seconds. Explore real-time training, held-out reconstructions, and measured results on the RTX 4050 Laptop GPU, RTX 4080, RTX 4090 and Radeon RX 7900 XT.">
+  <meta property="og:title" content="PERF-GS - 3D Gaussian Splatting in 10 seconds on an RTX 4090">
   <meta property="og:description" content="Run COLMAP on your photos in the PERF-GS hub or open an existing scene, then train and explore a 3D Gaussian Splatting model.">
   <meta property="og:type" content="website">
-  <title>PERF-GS - 3D Gaussian Splatting in 10 seconds</title>
+  <title>PERF-GS - 3D Gaussian Splatting in 10 seconds on an RTX 4090</title>
   <link rel="stylesheet" href="assets/project-page/site.css">
   <script src="assets/project-page/site.js" defer></script>
 </head>
@@ -23,7 +23,7 @@
   <main id="main">
     <section class="shell introduction" aria-labelledby="title">
       <h1 id="title">PERF-GS</h1>
-      <p class="subtitle">3D Gaussian Splatting in 10 seconds</p>
+      <p class="subtitle">3D Gaussian Splatting in 10 seconds on an RTX 4090</p>
       <p class="subtitle"><small>Efficient, extensible, cross-vendor, dependency-free & low VRAM differentiable training</small></p>
       <p class="byline"><a href="https://stefanoscolapasta.github.io/nozbufferallowed/about.html">Stefano Scolari</a><span aria-hidden="true">/</span><a href="https://seed.ea.com/">SEED, Electronic Arts</a></p>
       <div class="actions"><a class="button primary" href="https://github.com/electronicarts/perf-gs"><span class="code-icon" aria-hidden="true">&lt;/&gt;</span> View code</a><a class="button arrow-down" href="#quickstart">Quickstart</a></div>
@@ -98,7 +98,7 @@
         <h3 id="shader-design">Trainer architecture</h3>
         <p>We use <strong><a href="https://github.com/shader-slang/slangpy">SlangPy</a></strong> to write the training schedule in Python, the backend gpu dispatching using SlangPy and the kernels in Slang. Python picks a training camera, sets learning rates and decides when to grow the model (frontend training loop/setup), SlangPy compiles and caches each shader entry point for the session, then dispatches it through its Python RHI. There's no separate native extension to build.</p>
         <p>Slang autodiffs the math for one splat/primitive, while we write the backward pass that accounts for how overlapping splats combine into a pixel. A <i>primitive</i> defines its projection, coverage and color. Mark its projection and coverage functions as differentiable, and Slang generates their derivatives from the same source. The <i>compositor</i> blends the contributions. The disk primitive in our tests uses the same blend loop with its own coverage function. <a class="inline-link" href="https://github.com/electronicarts/perf-gs/blob/HEAD/shaders/core/interfaces.slang">Primitive interfaces</a> · <a class="inline-link" href="https://github.com/electronicarts/perf-gs/blob/HEAD/tests/test_disk_primitive.py">Disk primitive test</a></p>
-        <p>Vulkan is the cross-platform target, and D3D12 on Windows uses the same shader sources. Training has no CUDA or PyTorch dependency, but it is totally possible to interop with PyTorch and other frameworks. We've run Vulkan training on Windows with the Nvidia RTX 4080, Nvidia RTX 4090 and AMD Radeon RX 7900 XT. Linux and macOS are unverified, yet.</p>
+        <p>Vulkan is the cross-platform target, and D3D12 on Windows uses the same shader sources. Training has no CUDA or PyTorch dependency, but it is totally possible to interop with PyTorch and other frameworks. We've run Vulkan training on Windows with the Nvidia RTX 4050 Laptop GPU, RTX 4080, RTX 4090 and AMD Radeon RX 7900 XT. Linux and macOS are unverified, yet.</p>
         <h3 id="initialization">Initialization</h3>
         <p>COLMAP gives us camera poses and the initial sparse point cloud. Its color initializes the constant spherical harmonic coefficient, its opacity starts at 0.1, and its initial scale comes from the root-mean-square distance to its three nearest neighbors. That lets a dense patch of points start with smaller splats than a sparse one.</p>
         <p>We also seed geometry between those points. We take up to 28 anchor photos from the training split, rectify stereo pairs and match them in both directions. We then triangulate matches that agree left-to-right and right-to-left, then check where the 3D point lands in a third training photo. We keep it if the color agrees and this adds up to 256,000 splats in places the sparse reconstruction may barely have sampled, which helps speeding up initial convergence.</p>
@@ -249,7 +249,7 @@
 
     <section class="shell section" id="results" aria-labelledby="results-heading">
       <h2 id="results-heading">Benchmark results</h2>
-      <p class="lead">Each of the nine Mip-NeRF 360 scenes contributes equally. Graphdeco evaluation covers 246 held-out views, at quarter resolution outdoors and half resolution indoors.</p>
+      <p class="lead">The desktop GPU results average the nine Mip-NeRF 360 scenes equally. Graphdeco evaluation covers 246 held-out views, at quarter resolution outdoors and half resolution indoors. See the <a class="inline-link" href="#rtx-4050-laptop">RTX 4050 Laptop GPU results on three datasets</a> below.</p>
       <div class="table-wrap" role="region" tabindex="0" aria-label="Results by GPU and preset">
         <table>
           <thead><tr><th scope="col">GPU / preset</th><th scope="col">Steps</th><th scope="col">Train loop</th><th scope="col" class="arrow-up" aria-label="PSNR, higher is better">PSNR</th><th scope="col" class="arrow-up" aria-label="SSIM, higher is better">SSIM</th><th scope="col" class="arrow-down" aria-label="VGG LPIPS, lower is better">VGG LPIPS</th><th scope="col">End VRAM</th></tr></thead>
@@ -278,6 +278,77 @@
       </div>
       <p class="caption">Headless Vulkan, seed 42. Training-loop timing excludes COLMAP reconstruction, loading, initialization, held-out evaluation and export. Quality+ includes its training-view convergence checks. VRAM is sampled at loop end.</p>
       <p class="resource-links"><a href="NVIDIA_GeForce_RTX_4090_presets_current.csv" download>4090 fixed-budget CSV</a><a href="NVIDIA_GeForce_RTX_4090_qualityplus.csv" download>4090 Quality+ CSV</a><a href="NVIDIA_GeForce_RTX_4080_presets.csv" download>4080 fixed-budget CSV</a><a href="NVIDIA_GeForce_RTX_4080_qualityplus.csv" download>4080 Quality+ CSV</a><a href="AMD_Radeon_RX_7900_XT_presets.csv" download>7900 XT fixed-budget CSV</a><a href="AMD_Radeon_RX_7900_XT_qualityplus.csv" download>7900 XT Quality+ CSV</a></p>
+      <h3 id="rtx-4050-laptop">RTX 4050 Laptop GPU (6 GB)</h3>
+      <p>We tested each preset on 13 scenes on a Dell XPS 14 9440 with a 30 W enforced GPU power limit. Each row averages its completed scenes equally. Mip-NeRF 360 covers nine scenes at quarter resolution outdoors and half resolution indoors. Tanks &amp; Temples covers Train and Truck at half resolution, and Deep Blending covers DrJohnson and Playroom at full resolution.</p>
+      <div class="table-wrap" tabindex="0" role="region" aria-label="Mean results by dataset and preset on the RTX 4050 Laptop GPU">
+        <table>
+          <thead><tr><th scope="col">Dataset</th><th scope="col">Preset</th><th scope="col">Scenes</th><th scope="col">Steps</th><th scope="col">Train loop</th><th scope="col">PSNR ↑</th><th scope="col">SSIM ↑</th><th scope="col">VGG LPIPS ↓</th><th scope="col">Final splats</th><th scope="col">End VRAM</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Mip-NeRF 360</th><td>Ultrafast</td><td>5/9</td><td>3,000</td><td>69.54 s</td><td>24.575 dB</td><td>0.6957</td><td>0.3031</td><td>1.59M</td><td>3.86 GiB</td></tr>
+            <tr><th scope="row">Mip-NeRF 360</th><td>Ultrafast <br><small>(stream where required)</small></td><td>9/9</td><td>3,000</td><td>90.50 s</td><td>27.112 dB</td><td>0.7935</td><td>0.2566</td><td>1.43M</td><td>3.20 GiB</td></tr>
+            <tr><th scope="row">Mip-NeRF 360</th><td>Balanced</td><td>9/9</td><td>3,000</td><td>139.88 s</td><td>27.395 dB</td><td>0.8143</td><td>0.2228</td><td>2.07M</td><td>2.80 GiB</td></tr>
+            <tr><th scope="row">Mip-NeRF 360</th><td>Quality</td><td>9/9</td><td>3,500</td><td>191.41 s</td><td>27.893 dB</td><td>0.8285</td><td>0.1996</td><td>2.10M</td><td>4.77 GiB</td></tr>
+            <tr><th scope="row">Tanks &amp; Temples</th><td>Ultrafast</td><td>2/2</td><td>3,000</td><td>73.91 s</td><td>23.921 dB</td><td>0.8379</td><td>0.1954</td><td>1.37M</td><td>3.71 GiB</td></tr>
+            <tr><th scope="row">Tanks &amp; Temples</th><td>Balanced</td><td>2/2</td><td>3,000</td><td>105.40 s</td><td>24.104 dB</td><td>0.8507</td><td>0.1748</td><td>1.73M</td><td>2.60 GiB</td></tr>
+            <tr><th scope="row">Tanks &amp; Temples</th><td>Quality</td><td>2/2</td><td>3,500</td><td>123.24 s</td><td>24.466 dB</td><td>0.8579</td><td>0.1660</td><td>1.30M</td><td>4.60 GiB</td></tr>
+            <tr><th scope="row">Deep Blending</th><td>Ultrafast</td><td>2/2</td><td>3,000</td><td>51.04 s</td><td>29.890 dB</td><td>0.9036</td><td>0.2741</td><td>1.02M</td><td>4.60 GiB</td></tr>
+            <tr><th scope="row">Deep Blending</th><td>Balanced</td><td>2/2</td><td>3,000</td><td>84.99 s</td><td>29.914 dB</td><td>0.9078</td><td>0.2585</td><td>1.70M</td><td>2.73 GiB</td></tr>
+            <tr><th scope="row">Deep Blending</th><td>Quality</td><td>2/2</td><td>3,500</td><td>115.19 s</td><td>30.191 dB</td><td>0.9114</td><td>0.2458</td><td>1.83M</td><td>4.72 GiB</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Ultrafast exceeded the GPU memory budget during setup on Bonsai, Counter, Kitchen and Room. The stock row averages the scenes that completed with the preset defaults. The “stream where required” row adds the affected scenes, rerun with training images streamed from system RAM. The per-scene CSV records each override and the original capacity error. The trainer also reduces the splat capacity automatically when needed. The CSV lists the requested and effective capacities for each run.</p>
+      <p class="caption">Headless Vulkan, seed 42. Loop times exclude setup, held-out scoring and export. VRAM is process-local GPU memory at loop end. Graphdeco scored RGB8 renders from every eighth registered camera.</p>
+      <details class="frontier">
+        <summary>Inspect all 39 laptop runs</summary>
+        <div class="table-wrap" tabindex="0" role="region" aria-label="Per-scene laptop measurements">
+          <table>
+            <thead><tr><th scope="col">Scene</th><th scope="col">Preset</th><th scope="col">Test views</th><th scope="col">Train loop</th><th scope="col">PSNR ↑</th><th scope="col">SSIM ↑</th><th scope="col">VGG LPIPS ↓</th><th scope="col">Final splats</th><th scope="col">End VRAM</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">Bicycle</th><td>Ultrafast</td><td>25</td><td>61.80 s</td><td>24.591 dB</td><td>0.7029</td><td>0.3020</td><td>1.61M</td><td>4.16 GiB</td></tr>
+              <tr><th scope="row">Bicycle</th><td>Balanced</td><td>25</td><td>97.37 s</td><td>25.102 dB</td><td>0.7544</td><td>0.2397</td><td>2.49M</td><td>2.72 GiB</td></tr>
+              <tr><th scope="row">Bicycle</th><td>Quality</td><td>25</td><td>139.60 s</td><td>25.624 dB</td><td>0.7823</td><td>0.2000</td><td>2.61M</td><td>4.72 GiB</td></tr>
+              <tr><th scope="row">Flowers</th><td>Ultrafast</td><td>22</td><td>71.07 s</td><td>21.473 dB</td><td>0.5697</td><td>0.3821</td><td>1.59M</td><td>3.96 GiB</td></tr>
+              <tr><th scope="row">Flowers</th><td>Balanced</td><td>22</td><td>111.09 s</td><td>21.724 dB</td><td>0.6018</td><td>0.3402</td><td>2.49M</td><td>2.72 GiB</td></tr>
+              <tr><th scope="row">Flowers</th><td>Quality</td><td>22</td><td>169.87 s</td><td>22.025 dB</td><td>0.6298</td><td>0.3020</td><td>2.55M</td><td>4.72 GiB</td></tr>
+              <tr><th scope="row">Garden</th><td>Ultrafast</td><td>24</td><td>84.16 s</td><td>26.786 dB</td><td>0.8246</td><td>0.1870</td><td>1.59M</td><td>4.16 GiB</td></tr>
+              <tr><th scope="row">Garden</th><td>Balanced</td><td>24</td><td>140.59 s</td><td>27.267 dB</td><td>0.8532</td><td>0.1347</td><td>2.26M</td><td>2.73 GiB</td></tr>
+              <tr><th scope="row">Garden</th><td>Quality</td><td>24</td><td>203.85 s</td><td>27.774 dB</td><td>0.8688</td><td>0.1113</td><td>2.35M</td><td>4.73 GiB</td></tr>
+              <tr><th scope="row">Stump</th><td>Ultrafast</td><td>16</td><td>62.41 s</td><td>26.957 dB</td><td>0.7687</td><td>0.2516</td><td>1.58M</td><td>3.41 GiB</td></tr>
+              <tr><th scope="row">Stump</th><td>Balanced</td><td>16</td><td>100.03 s</td><td>27.331 dB</td><td>0.7923</td><td>0.2141</td><td>2.55M</td><td>2.72 GiB</td></tr>
+              <tr><th scope="row">Stump</th><td>Quality</td><td>16</td><td>145.81 s</td><td>27.700 dB</td><td>0.8093</td><td>0.1881</td><td>2.61M</td><td>4.72 GiB</td></tr>
+              <tr><th scope="row">Treehill</th><td>Ultrafast</td><td>18</td><td>68.26 s</td><td>23.070 dB</td><td>0.6125</td><td>0.3928</td><td>1.59M</td><td>3.62 GiB</td></tr>
+              <tr><th scope="row">Treehill</th><td>Balanced</td><td>18</td><td>109.35 s</td><td>23.088 dB</td><td>0.6415</td><td>0.3336</td><td>2.47M</td><td>2.73 GiB</td></tr>
+              <tr><th scope="row">Treehill</th><td>Quality</td><td>18</td><td>158.18 s</td><td>23.230 dB</td><td>0.6578</td><td>0.2895</td><td>2.71M</td><td>4.72 GiB</td></tr>
+              <tr><th scope="row">Bonsai</th><td>Ultrafast (streamed retry)</td><td>37</td><td>107.29 s</td><td>30.730 dB</td><td>0.9349</td><td>0.2077</td><td>1.32M</td><td>2.38 GiB</td></tr>
+              <tr><th scope="row">Bonsai</th><td>Balanced</td><td>37</td><td>159.84 s</td><td>30.962 dB</td><td>0.9381</td><td>0.1990</td><td>1.74M</td><td>2.89 GiB</td></tr>
+              <tr><th scope="row">Bonsai</th><td>Quality</td><td>37</td><td>211.27 s</td><td>31.699 dB</td><td>0.9427</td><td>0.1902</td><td>1.90M</td><td>4.83 GiB</td></tr>
+              <tr><th scope="row">Counter</th><td>Ultrafast (streamed retry)</td><td>30</td><td>129.19 s</td><td>28.098 dB</td><td>0.8954</td><td>0.2147</td><td>1.20M</td><td>2.38 GiB</td></tr>
+              <tr><th scope="row">Counter</th><td>Balanced</td><td>30</td><td>195.59 s</td><td>28.124 dB</td><td>0.9008</td><td>0.2031</td><td>1.47M</td><td>2.89 GiB</td></tr>
+              <tr><th scope="row">Counter</th><td>Quality</td><td>30</td><td>247.08 s</td><td>28.749 dB</td><td>0.9081</td><td>0.1928</td><td>1.34M</td><td>4.83 GiB</td></tr>
+              <tr><th scope="row">Kitchen</th><td>Ultrafast (streamed retry)</td><td>35</td><td>132.54 s</td><td>30.873 dB</td><td>0.9194</td><td>0.1422</td><td>1.13M</td><td>2.38 GiB</td></tr>
+              <tr><th scope="row">Kitchen</th><td>Balanced</td><td>35</td><td>196.69 s</td><td>31.072 dB</td><td>0.9243</td><td>0.1307</td><td>1.52M</td><td>2.89 GiB</td></tr>
+              <tr><th scope="row">Kitchen</th><td>Quality</td><td>35</td><td>243.09 s</td><td>31.831 dB</td><td>0.9297</td><td>0.1242</td><td>1.22M</td><td>4.83 GiB</td></tr>
+              <tr><th scope="row">Room</th><td>Ultrafast (streamed retry)</td><td>39</td><td>97.78 s</td><td>31.434 dB</td><td>0.9138</td><td>0.2297</td><td>1.25M</td><td>2.38 GiB</td></tr>
+              <tr><th scope="row">Room</th><td>Balanced</td><td>39</td><td>148.39 s</td><td>31.884 dB</td><td>0.9219</td><td>0.2104</td><td>1.65M</td><td>2.89 GiB</td></tr>
+              <tr><th scope="row">Room</th><td>Quality</td><td>39</td><td>203.93 s</td><td>32.402 dB</td><td>0.9280</td><td>0.1987</td><td>1.65M</td><td>4.83 GiB</td></tr>
+              <tr><th scope="row">Train</th><td>Ultrafast</td><td>38</td><td>74.51 s</td><td>20.961 dB</td><td>0.7758</td><td>0.2612</td><td>1.35M</td><td>3.86 GiB</td></tr>
+              <tr><th scope="row">Train</th><td>Balanced</td><td>38</td><td>100.55 s</td><td>21.109 dB</td><td>0.7943</td><td>0.2385</td><td>1.65M</td><td>2.60 GiB</td></tr>
+              <tr><th scope="row">Train</th><td>Quality</td><td>38</td><td>120.08 s</td><td>21.540 dB</td><td>0.8043</td><td>0.2268</td><td>1.25M</td><td>4.60 GiB</td></tr>
+              <tr><th scope="row">Truck</th><td>Ultrafast</td><td>32</td><td>73.31 s</td><td>26.880 dB</td><td>0.8999</td><td>0.1297</td><td>1.38M</td><td>3.55 GiB</td></tr>
+              <tr><th scope="row">Truck</th><td>Balanced</td><td>32</td><td>110.25 s</td><td>27.099 dB</td><td>0.9072</td><td>0.1111</td><td>1.81M</td><td>2.60 GiB</td></tr>
+              <tr><th scope="row">Truck</th><td>Quality</td><td>32</td><td>126.40 s</td><td>27.392 dB</td><td>0.9114</td><td>0.1053</td><td>1.35M</td><td>4.60 GiB</td></tr>
+              <tr><th scope="row">DrJohnson</th><td>Ultrafast</td><td>33</td><td>47.51 s</td><td>29.102 dB</td><td>0.8960</td><td>0.2879</td><td>0.79M</td><td>4.65 GiB</td></tr>
+              <tr><th scope="row">DrJohnson</th><td>Balanced</td><td>33</td><td>86.50 s</td><td>29.298 dB</td><td>0.9028</td><td>0.2679</td><td>1.72M</td><td>2.74 GiB</td></tr>
+              <tr><th scope="row">DrJohnson</th><td>Quality</td><td>33</td><td>118.65 s</td><td>29.669 dB</td><td>0.9083</td><td>0.2512</td><td>1.94M</td><td>4.73 GiB</td></tr>
+              <tr><th scope="row">Playroom</th><td>Ultrafast</td><td>29</td><td>54.57 s</td><td>30.677 dB</td><td>0.9113</td><td>0.2603</td><td>1.24M</td><td>4.54 GiB</td></tr>
+              <tr><th scope="row">Playroom</th><td>Balanced</td><td>29</td><td>83.48 s</td><td>30.529 dB</td><td>0.9127</td><td>0.2490</td><td>1.68M</td><td>2.72 GiB</td></tr>
+              <tr><th scope="row">Playroom</th><td>Quality</td><td>29</td><td>111.73 s</td><td>30.713 dB</td><td>0.9145</td><td>0.2403</td><td>1.73M</td><td>4.72 GiB</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </details>
+      <p class="resource-links"><a href="NVIDIA_GeForce_RTX_4050_Laptop_GPU_benchmarks.csv" download>Per-scene laptop measurements (CSV)</a><a href="NVIDIA_GeForce_RTX_4050_Laptop_GPU_system.txt">Laptop and software versions</a><a href="https://github.com/electronicarts/perf-gs/blob/HEAD/docs/benchmark-rtx4050.md">Reproduce the laptop benchmark</a><a href="https://github.com/electronicarts/perf-gs/blob/HEAD/docs/benchmarks.md#truck-timing-and-memory">Truck timing investigation</a></p>
       <details class="frontier"><summary>Compare the same models on Radeon and GeForce</summary>
         <img src="assets/rx7900xt-fixed-model-errors.png" loading="lazy" width="1260" height="840" alt="Nearly identical RTX 4080 and RX 7900 XT crops of Stump and Kitchen, alongside amplified pixel differences">
         <p class="caption">Both cards rendered the same two saved models from 51 held-out cameras using Vulkan. Of 219,272,010 RGB8 channel values, 712 differed by more than one level. The largest difference was 12 levels. <a href="AMD_Radeon_RX_7900_XT_fixed_model.csv" download>Fixed-model measurements</a></p>

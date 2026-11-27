@@ -4,7 +4,7 @@
 [![Languages: Python and Slang](https://img.shields.io/badge/languages-Python%20%2B%20Slang-CF7434)](#architecture-from-a-high-level)
 [![Backends: Vulkan, D3D12 and Metal](https://img.shields.io/badge/backends-Vulkan%20%2B%20D3D12%20%2B%20Metal-355B3E)](#requirements)
 
-**Efficient, extensible, dependency-free & low memory differentiable training in 10 seconds.**
+**Efficient, extensible, dependency-free & low memory differentiable training in 10 seconds on an RTX 4090.**
 
 Run COLMAP on a folder of photos directly in the PERF-GS standalone app, or open an existing COLMAP scene. Then train a 3D Gaussian Splatting model with Slang on Vulkan, D3D12, or Metal (Apple Silicon).<br>
 On an **RTX 4090**:
@@ -17,7 +17,7 @@ The **Quality+** preset continues training until PSNR on training views levels o
 
 As of November 2026, **perf-gs** is, to the best of our knowledge, the fastest publicly available open-source 3D Gaussian Splatting trainer, outperforming competitors such as [LiteGS](https://github.com/MooreThreads/LiteGS), [SAD-GS](https://github.com/LinjieLyu/SADGS) and [FastGS](https://github.com/fastgs/FastGS) in training speed while delivering competitive or superior reconstruction quality, with low VRAM usage.<br>
 
-For GPUs with less VRAM, Balanced streams training images from system RAM. It used **2.72-2.90 GiB of VRAM at loop end** across the two workstations. [VRAM and system RAM breakdown](docs/benchmarks.md#where-memory-goes)
+For GPUs with less VRAM, Balanced streams training images from system RAM. On the **6 GB RTX 4050 Laptop GPU** at 30 W, it averaged **139.88 s per scene** and **2.80 GiB at loop end** across the nine Mip-NeRF 360 scenes. [Laptop preset comparison](#rtx-4050-laptop-gpu) · [VRAM and system RAM breakdown](docs/benchmarks.md#where-memory-goes)
 
 [Quickstart](#quickstart) - [Benchmarks](#mip-nerf-360) - [Gallery](#reconstructions)
 
@@ -53,7 +53,7 @@ Python picks a training camera, sets the learning rates and decides when to grow
 
 A *primitive* supplies its projection, its coverage at a pixel, and its color. The *compositor* takes care of blending it over what's behind it. With Slang.D we can mark the projection and coverage functions as differentiable. Change the math in one of those functions and Slang generates its derivatives from the same source. For performance reasons, we still need to write the outer shell's backward passes ourselves. There's a small disk primitive in the tests that uses the same forward blend loop with its own coverage function. [Primitive interfaces](https://github.com/electronicarts/perf-gs/blob/HEAD/shaders/core/interfaces.slang) - [Disk primitive test](https://github.com/electronicarts/perf-gs/blob/HEAD/tests/test_disk_primitive.py)
 
-Vulkan is the cross-platform target. D3D12 on Windows and Metal on Apple Silicon macOS use the same shader sources. Training has no CUDA or PyTorch dependency. One detail that mattered across vendors was wave size (32-lane on NVIDIA/Apple Silicon, 64-lane on AMD). We've run training on Windows (Vulkan/D3D12) with the Nvidia RTX 4080, Nvidia RTX 4090 and AMD Radeon RX 7900 XT, and on macOS (Metal) with Apple M4 Pro. Linux is unverified yet.
+Vulkan is the cross-platform target. D3D12 on Windows and Metal on Apple Silicon macOS use the same shader sources. Training has no CUDA or PyTorch dependency. One detail that mattered across vendors was wave size (32-lane on NVIDIA/Apple Silicon, 64-lane on AMD). We've run training on Windows (Vulkan/D3D12) with the Nvidia RTX 4050 Laptop GPU, Nvidia RTX 4080, Nvidia RTX 4090 and AMD Radeon RX 7900 XT, and on macOS (Metal) with Apple M4 Pro. Linux is unverified yet.
 
 <a name="where-the-first-splats-come-from"></a>
 
@@ -125,8 +125,8 @@ This runs Quality's 3,500 steps and continues with the model it just trained. Th
 ## Requirements
 
 - **OS and Python.** Python 3.10+. Tested on Windows 11 and macOS (Apple Silicon). Linux is unverified.
-- **GPU.** Tested on the AMD Radeon RX 7900 XT (20 GB), NVIDIA RTX 4080 (16 GB), RTX 4090 (24 GB), and Apple M4 Pro (Metal). The rasterizer supports 32- and 64-lane waves through Vulkan (default on Windows/Linux), Direct3D 12 (Windows), or Metal (default on macOS; requires Xcode Command Line Tools + Apple's Metal Toolchain).
-- **VRAM.** Balanced used 2.72-2.90 GiB at loop end on the tested NVIDIA cards, 2.76-2.95 GiB on the RX 7900 XT, and 2.19 GiB base GPU buffers (2.23 GiB total allocated) on Apple Silicon Metal (using packed 56 B `Gaussian3D` and native `atomic_float` gradients). Peak and viewer usage can be higher. [GPU memory measurements](docs/benchmarks.md)
+- **GPU.** Tested on the NVIDIA RTX 4050 Laptop GPU (6 GB), RTX 4080 (16 GB), RTX 4090 (24 GB), AMD Radeon RX 7900 XT (20 GB), and Apple M4 Pro (Metal). The rasterizer supports 32- and 64-lane waves through Vulkan (default on Windows/Linux), Direct3D 12 (Windows), or Metal (default on macOS; requires Xcode Command Line Tools + Apple's Metal Toolchain).
+- **VRAM.** On Mip-NeRF 360, Balanced used 2.72-2.90 GiB at loop end on the RTX 4080 and 4090, 2.76-2.95 GiB on the RX 7900 XT, and 2.19 GiB base GPU buffers (2.23 GiB total allocated) on Apple Silicon Metal (using packed 56 B `Gaussian3D` and native `atomic_float` gradients). Peak and viewer usage can be higher. [GPU memory measurements](docs/benchmarks.md)
 
 ## Quickstart
 Perf-gs was designed to be extremely simple to setup and install.
@@ -200,9 +200,32 @@ python3 -m venv .venv
 .venv/bin/python -m trainer.frontend.app --scene datasets/tandt/truck --no-viewer --save-ply
 ```
 
+<a id="rtx-4050-laptop-gpu-on-truck"></a>
+
+## RTX 4050 Laptop GPU
+
+On a Dell XPS 14 9440 with a 6 GB RTX 4050 Laptop GPU and a 30 W enforced power limit, we tested the three presets at seed 42. The three datasets contributed 246 held-out views from nine Mip-NeRF 360 scenes, 70 from Train and Truck, and 62 from DrJohnson and Playroom. Each row gives equal weight to its completed scenes.
+
+| Dataset | Preset | Scenes | Steps | Train loop | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ | Final splats | End VRAM |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Mip-NeRF 360 | Ultrafast | 5/9 | 3,000 | 69.54 s | 24.575 dB | 0.6957 | 0.3031 | 1.59M | 3.86 GiB |
+| Mip-NeRF 360 | Ultrafast (stream where required) | 9/9 | 3,000 | 90.50 s | 27.112 dB | 0.7935 | 0.2566 | 1.43M | 3.20 GiB |
+| Mip-NeRF 360 | Balanced | 9/9 | 3,000 | 139.88 s | 27.395 dB | 0.8143 | 0.2228 | 2.07M | 2.80 GiB |
+| Mip-NeRF 360 | Quality | 9/9 | 3,500 | 191.41 s | 27.893 dB | 0.8285 | 0.1996 | 2.10M | 4.77 GiB |
+| Tanks & Temples | Ultrafast | 2/2 | 3,000 | 73.91 s | 23.921 dB | 0.8379 | 0.1954 | 1.37M | 3.71 GiB |
+| Tanks & Temples | Balanced | 2/2 | 3,000 | 105.40 s | 24.104 dB | 0.8507 | 0.1748 | 1.73M | 2.60 GiB |
+| Tanks & Temples | Quality | 2/2 | 3,500 | 123.24 s | 24.466 dB | 0.8579 | 0.1660 | 1.30M | 4.60 GiB |
+| Deep Blending | Ultrafast | 2/2 | 3,000 | 51.04 s | 29.890 dB | 0.9036 | 0.2741 | 1.02M | 4.60 GiB |
+| Deep Blending | Balanced | 2/2 | 3,000 | 84.99 s | 29.914 dB | 0.9078 | 0.2585 | 1.70M | 2.73 GiB |
+| Deep Blending | Quality | 2/2 | 3,500 | 115.19 s | 30.191 dB | 0.9114 | 0.2458 | 1.83M | 4.72 GiB |
+
+Ultrafast exceeded the GPU memory budget during setup on Bonsai, Counter, Kitchen and Room. The stock row averages the scenes that completed with the preset defaults. The “stream where required” row adds the affected scenes, rerun with training images streamed from system RAM. The per-scene CSV records each override and the original capacity error. The trainer also reduces the splat capacity automatically when needed. The CSV lists the requested and effective capacities for each run.
+
+Training used headless Vulkan. Loop time excludes setup, held-out evaluation and export. VRAM is process-local GPU memory at loop end. Graphdeco scored RGB8 renders and averaged each metric over held-out views within a scene. Mip-NeRF 360 used quarter resolution outdoors and half indoors, Tanks & Temples used half resolution and Deep Blending used full resolution. [All 39 measurements](docs/NVIDIA_GeForce_RTX_4050_Laptop_GPU_benchmarks.csv) · [Laptop and software versions](docs/NVIDIA_GeForce_RTX_4050_Laptop_GPU_system.txt) · [Reproduce the laptop benchmark](docs/benchmark-rtx4050.md) · [Truck timing investigation](docs/benchmarks.md#truck-timing-and-memory)
+
 ## Mip-NeRF 360
 
-All headline results give equal weight to the nine Mip-NeRF 360 scenes. On the RTX 4080, Quality+ averaged **28.225 dB across all nine** and **29.834 dB across the seven scenes used by gsplat and LichtFeld**, which exclude *Flowers* and *Treehill*. [Per-scene results](docs/NVIDIA_GeForce_RTX_4080_qualityplus.csv) - [gsplat benchmark](https://github.com/nerfstudio-project/gsplat/blob/main/docs/source/tests/eval.rst) - [LichtFeld benchmark](https://lichtfeld.io/bounty/bounty4/)
+The following benchmark tables give equal weight to the nine Mip-NeRF 360 scenes. On the RTX 4080, Quality+ averaged **28.225 dB across all nine** and **29.834 dB across the seven scenes used by gsplat and LichtFeld**, which exclude *Flowers* and *Treehill*. [Per-scene results](docs/NVIDIA_GeForce_RTX_4080_qualityplus.csv) - [gsplat benchmark](https://github.com/nerfstudio-project/gsplat/blob/main/docs/source/tests/eval.rst) - [LichtFeld benchmark](https://lichtfeld.io/bounty/bounty4/)
 
 ### RTX 4090
 

@@ -1,5 +1,41 @@
 # Training benchmarks
 
+## RTX 4050 Laptop GPU on Truck
+
+The original timing check used Truck, the Tanks & Temples quickstart scene. Each preset trained once at seed 42 on 219 half-resolution images (978 × 545). Every eighth camera in filename order was held out, giving all three presets the same 32 test views. These first runs used the trainer's floating-point sRGB PSNR and SSIM. The full 13-scene comparison uses fresh Truck runs with saved renders and independent Graphdeco RGB8 scoring. [Three-dataset comparison](../README.md#rtx-4050-laptop-gpu) · [Full sweep protocol](benchmark-rtx4050.md) · [Original Truck measurements (CSV)](NVIDIA_GeForce_RTX_4050_Laptop_GPU_truck.csv)
+
+The Dell XPS 14 9440 has a 6 GB RTX 4050 Laptop GPU. NVIDIA's driver reported a 30 W enforced power limit. The system used an Intel Core Ultra 7 155H, Windows 11 Enterprise (build 26100), NVIDIA driver 610.74, Python 3.13.2 and SlangPy 0.42.0 with PERF-GS at `26a4ca2`. Time covers the headless Vulkan training loop through final synchronization and excludes scene loading, initialization and held-out evaluation. VRAM measures the trainer process's local GPU memory at loop end.
+
+To reproduce from the repository root after the Windows quickstart setup, fetch Truck and the NVIDIA sampling masks used by Ultrafast. Run each preset in its own process with the GPU idle. Ultrafast and Balanced default to 3,000 steps and Quality defaults to 3,500. [Windows setup](../README.md#quickstart) · [NVIDIA mask terms](stbn_pixel_sampling.md)
+
+```powershell
+$python = ".\.venv\Scripts\python.exe"
+& $python scripts/data/download_tandt_db.py --set tandt
+& $python scripts/data/download_stbn.py
+foreach ($preset in 'ultrafast', 'balanced', 'quality') {
+    & $python -m trainer.frontend.app --scene datasets/tandt/truck --preset $preset `
+        --backend vulkan --downsample 2 --seed 42 --no-viewer --evaluation `
+        --final-test-psnr --log-every 0 --eval-every 0 --preview-every 0 `
+        --no-write-ground-truths --run-report
+}
+```
+
+Each run writes its settings, timings and per-view scores to `outputs/train/<run-name>/run_report.json`. The companion `test_psnr.json` records the loop-end VRAM usage in bytes.
+
+### Truck timing and memory
+
+The original Ultrafast run completed 3,000 steps in **73.11 s** (41.0 steps/s). The trainer recorded 73.06 s of active training and 0.05 s of in-loop observation. Its full process timer read 132.16 s after held-out evaluation. During the loop, two NVIDIA samples 30 s apart showed 100% GPU utilization at 29.94 W and 29.88 W, near the laptop's 30 W limit.
+
+At loop end the trainer used 3.55 GiB of its 5.03 GiB local GPU memory budget. Its pipeline buffers accounted for 1.95 GiB, cached training photos for 0.52 GiB and per-view structure fields for 1.03 GiB. The run also held 1.50 GiB of decoded images in system RAM. [Truck measurements](NVIDIA_GeForce_RTX_4050_Laptop_GPU_truck.csv) · [How PERF-GS measures memory](#where-memory-goes)
+
+An isolated Ultrafast repeat took **73.31 s**, within 0.3% of the original. Sampled dedicated GPU memory peaked at 3.56 GiB and shared GPU memory at 67 MiB. The laptop had over 36 GiB of system RAM available, and median PCIe traffic into the GPU was 4.8 MiB/s. The GPU ran at 100% median utilization and 29.94 W median power. The driver reported power-capped clocks in all 68 in-loop samples. This reproduces the timing with headroom in local VRAM and little evidence of sustained paging. [Truck repeat telemetry](NVIDIA_GeForce_RTX_4050_Laptop_GPU_telemetry.csv)
+
+**Same-scene desktop comparison.** On Mip-NeRF 360 Stump, the 3,000-step Ultrafast loop took **62.41 s** on the RTX 4050 Laptop GPU, **13.17 s** on the RTX 4080 and **7.86 s** on the RTX 4090. All used seed 42 and 1,245 × 825 images. The archived RTX 4090 run used trainer revision `d69f4f2`. The laptop took 7.9× as long as the 4090. During the laptop run the trainer used at most 3.42 GiB of dedicated GPU memory and 67 MiB of shared GPU memory at the sample times. Median GPU utilization was 100% at 29.96 W. The driver reported power-capped clocks in 56 of 57 samples and thermal slowdown in zero. These readings point to sustained GPU work at the laptop's power limit, with little use of shared GPU memory on this scene. [RTX 4080 results](NVIDIA_GeForce_RTX_4080_presets.csv) · [RTX 4090 results](NVIDIA_GeForce_RTX_4090_presets_current.csv) · [Laptop telemetry by scene](NVIDIA_GeForce_RTX_4050_Laptop_GPU_telemetry.csv)
+
+Across the 36 runs with in-loop telemetry, the largest sampled shared GPU memory use was 113 MiB (Kitchen, Balanced). The largest sampled dedicated GPU memory use was 4.84 GiB (Room, Quality). Windows sampled both counters for the trainer process on the NVIDIA adapter every two seconds. NVML sampled utilization, power, clocks, temperature and PCIe traffic roughly once per second. Each CSV row covers at least 90% of that loop's duration between the first and last samples. Shared GPU memory is system RAM accessible to the GPU. The Windows paging counters in the CSV cover the whole system. [Telemetry CSV](NVIDIA_GeForce_RTX_4050_Laptop_GPU_telemetry.csv) · [Microsoft's GPU memory definitions](https://devblogs.microsoft.com/directx/gpus-in-the-task-manager/) · [NVIDIA's clock event definitions](https://docs.nvidia.com/deploy/archive/R535/nvml-api/group__nvmlClocksEventReasons.html)
+
+VRAM capacity did limit default Ultrafast on the four indoor Mip-NeRF 360 scenes. At half resolution the trainer's memory planner rejected Bonsai, Counter, Kitchen and Room before step one. After setting aside driver headroom, it had 4.49 GiB available to hold the initial splats, training photos, per-view structure fields and pipeline buffers. [Laptop benchmark coverage](benchmark-rtx4050.md) · [Memory planner](../src/trainer/frontend/app.py)
+
 ## Radeon RX 7900 XT
 
 | Preset | Steps | Train loop | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ | Final splats | VRAM at loop end |
