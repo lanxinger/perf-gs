@@ -47,8 +47,12 @@ def _call(obj, slot, *args):
 
 def query_video_memory(adapter_name: str) -> tuple[int, int] | None:
     """``(budget, current_usage)`` bytes for the adapter named ``adapter_name``, else for the
-    hardware adapter with the most dedicated memory; None off Windows or without DXGI.
+    hardware adapter with the most dedicated memory; uses DXGI on Windows, Metal on macOS,
+    and returns None on other platforms.
     """
+    if sys.platform == "darwin":
+        from trainer.backend.platform.metal import query_metal_video_memory
+        return query_metal_video_memory(adapter_name)
     if sys.platform != "win32":
         return None
     try:

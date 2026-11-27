@@ -19,10 +19,9 @@ import slangpy as spy
 from trainer.backend.memory.buffers import _reflect_types
 from trainer.backend.compute.device import SHADERS_DIR, create_device
 
-BACKENDS = ["vulkan", "d3d12"]
+BACKENDS = ["vulkan", "d3d12", "metal"]
 
-# Frozen byte size per struct — all tightly packed float32 (stride == size):
-# Gaussian3D=14, Projected2DGaussian=7, BlendData=10, AdamState=28 floats.
+# Frozen byte size per struct — identical packed scalar layout across Vulkan, D3D12 and Metal.
 FROZEN_SIZES = {
     "Gaussian3D": 56,
     "Projected2DGaussian": 28,
@@ -79,5 +78,5 @@ def test_gaussian_layout_dtype_matches_reflection(backend: str) -> None:
     assert layout.float_count == 14
     assert layout.dtype.names == ("mean", "log_scale", "rot_quat", "opacity", "sh0")
     fields = layout.dtype.fields
-    assert [(fields[name][1], fields[name][0].shape) for name in layout.dtype.names] == [
-        (0, (3,)), (12, (3,)), (24, (4,)), (40, ()), (44, (3,))]
+    expected_offsets = [(0, (3,)), (12, (3,)), (24, (4,)), (40, ()), (44, (3,))]
+    assert [(fields[name][1], fields[name][0].shape) for name in layout.dtype.names] == expected_offsets

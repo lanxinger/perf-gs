@@ -6,11 +6,13 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import slangpy as spy
 from _colmap_testkit import write_colmap_scene
 from _pipeline_testkit import TestPipeline
 
-from trainer.backend.compute.device import create_device
+from trainer.backend.compute.device import SHADERS_DIR, create_device
 from trainer.backend.memory.buffers import GRAD_SCALAR_COMPONENTS
+from trainer.backend.memory.layout import StructLayout
 from trainer.backend.optimize.adam import AdamOptimizer
 from trainer.backend.render.pipeline import TrainingPipeline
 from trainer.config.config import AdamLRs, AppearanceConfig, LossConfig
@@ -28,7 +30,7 @@ V_IDX = [3, 4, 5, 9, 10, 11, 16, 17, 18, 19, 21, 25, 26, 27]
 BF16_ULP = 2.0 ** -7
 
 
-@pytest.fixture(params=["vulkan", "d3d12"])
+@pytest.fixture(params=["vulkan", "d3d12", "metal"])
 def backend(request):
     return request.param
 
@@ -105,7 +107,8 @@ def test_stochastic_rounding_keeps_the_second_moment_moving(backend) -> None:
     b = pipeline.buffers
     start = np.full(16 * 14, np.float32(0.25).view(np.uint32), np.uint32)  # m=0, v=0.25
     b.adam.state.storage.copy_from_numpy(start)
-    gradient = np.full(16, 1 << 16, np.int64)  # 1.0 in fixed point
+    from trainer.backend.memory.buffers import encode_grad_array
+    gradient = encode_grad_array(b.gradients.params["mean_x"], np.ones(16, dtype=np.float64))
     steps = 300
     for step in range(1, steps + 1):
         for name in GRAD_SCALAR_COMPONENTS:

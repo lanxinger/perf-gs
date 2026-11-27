@@ -31,7 +31,7 @@ void rankFamilies(uint3 tid : SV_DispatchThreadID, StructuredBuffer<uint> pre_co
     RWStructuredBuffer<uint> histogram, RWStructuredBuffer<uint> action,
     RWStructuredBuffer<uint> factor_x, RWStructuredBuffer<uint> factor_y, RWStructuredBuffer<uint> factor_z,
     StructuredBuffer<uint> eta_x, StructuredBuffer<uint> eta_y, StructuredBuffer<uint> eta_z,
-    StructuredBuffer<uint> views, StructuredBuffer<int64_t> gradient,
+    StructuredBuffer<uint> views, ReadGradBuffer gradient,
     uniform float gradient_scale, uniform uint capacity, uniform uint apply)
 {
     uint i = tid.x;
@@ -40,7 +40,7 @@ void rankFamilies(uint3 tid : SV_DispatchThreadID, StructuredBuffer<uint> pre_co
     if (act != 1u && act != 2u) return;
     uint3 factors = act == 2u ? uint3(2u, 1u, 1u) : uint3(factor_x[i], factor_y[i], factor_z[i]);
     uint3 eta = uint3(eta_x[i], eta_y[i], eta_z[i]);
-    float evidence = fromFixed(gradient[i]) / max(float(views[i]), 1.0) / gradient_scale;
+    float evidence = fromGrad(gradient[i]) / max(float(views[i]), 1.0) / gradient_scale;
     uint3 granted = uint3(1u);
     uint size = 1u;
     for (uint level = 0u; level < 3u; ++level)

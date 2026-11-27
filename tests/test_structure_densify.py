@@ -75,12 +75,13 @@ def _set_eta(p: TestPipeline, idx: int, *, n_total: int,
     # is_grad_high signal: avg_grad = (mag/65536)/vis, compared against the
     # convention-scaled floor grad_threshold*W*H*3 (~0.12 at 64x64). Set vis=1
     # and a mag comfortably above it (or at zero, below).
+    from trainer.backend.memory.buffers import encode_grad_array
     vis = 1
-    mag = int(1.0 * 65536.0) if grad_high else 0  # avg_grad = 1.0 (>> ~0.12 floor), or 0
     w(b.densification.visibility_count, vis)
-    a = np.zeros(N, dtype=np.int64)
-    a[idx] = mag
-    b.densification.grad_mean_2d_mag.copy_from_numpy(a)
+    a = np.zeros(N, dtype=np.float64)
+    a[idx] = 1.0 if grad_high else 0.0
+    b.densification.grad_mean_2d_mag.copy_from_numpy(
+        encode_grad_array(b.densification.grad_mean_2d_mag, a))
 
 
 def _one_gaussian(p: TestPipeline, scale=0.1, opacity=0.9) -> None:
@@ -135,9 +136,8 @@ def test_small_gaussian_clones_not_splits(gpu_device) -> None:
     assert actions["n_split"] == 0
     assert _count(p) == 2, f"clone should append exactly 1 duplicate, got {_count(p)}"
 
-    # The clone is an exact duplicate of the parent (same first-14 floats).
-    g = np.frombuffer(p.buffers.primitive.values.to_numpy().tobytes(),
-                      dtype=np.float32).reshape(-1, 14)
+    # The clone is an exact duplicate of the parent (same 14 semantic floats).
+    g = _read_gaussians(p, 2)
     assert np.allclose(g[0], g[1]), "clone is not an exact duplicate of the parent"
 
 
@@ -298,8 +298,10 @@ def test_candidate_compaction_partial_wave_and_reuse(gpu_device) -> None:
     b.eta.components["n_low"].copy_from_numpy(np.zeros_like(total))
     for axis in ("max_x", "max_y", "max_z"):
         b.eta.components[axis].copy_from_numpy(total * 65536)
+    from trainer.backend.memory.buffers import encode_grad_array
     b.densification.visibility_count.copy_from_numpy((total > 0).astype(np.uint32))
-    b.densification.grad_mean_2d_mag.copy_from_numpy((total > 0).astype(np.int64) * 65536)
+    b.densification.grad_mean_2d_mag.copy_from_numpy(
+        encode_grad_array(b.densification.grad_mean_2d_mag, (total > 0).astype(np.float64)))
     p.structure_densifier.densify(StructureConfig(dense_scale=0.2))
     assert _count(p) == 514
     assert int(b.structure.children_sum.to_numpy()[0]) == n
@@ -404,10 +406,9 @@ def test_anisotropic_split_preserves_covariance(gpu_device) -> None:
     m = _count(p)
     assert m == 6, f"expected 3*2*1 = 6 grid children, got {m}"
 
-    # Read back the 6 children: packed 14 floats each (mean[0:3], log_scale[3:6],
+    # Read back the 6 children: 14 semantic floats each (mean[0:3], log_scale[3:6],
     # rot_quat[6:10], opacity[10], sh0[11:14]).
-    g = np.frombuffer(p.buffers.primitive.values.to_numpy().tobytes(),
-                      dtype=np.float32).reshape(-1, 14)[:m].astype(np.float64)
+    g = _read_gaussians(p, m).astype(np.float64)
     child_means = g[:, 0:3]
     child_scales = np.exp(g[:, 3:6])
 
@@ -479,9 +480,10 @@ def test_scoring_kernel_flags_large_gaussian(gpu_device) -> None:
     def _set_grad_high(p):
         # The split gate ANDs in is_grad_high; inject an above-threshold avg
         # grad so the test isolates the eta/frequency behaviour.
+        from trainer.backend.memory.buffers import encode_grad_array
         N = p.max_splats
         p.buffers.densification.visibility_count.copy_from_numpy(np.ones(N, dtype=np.uint32))
-        mag = np.full(N, int(1.0 * 65536.0), dtype=np.int64)
+        mag = encode_grad_array(p.buffers.densification.grad_mean_2d_mag, np.ones(N, dtype=np.float64))
         p.buffers.densification.grad_mean_2d_mag.copy_from_numpy(mag)
 
     # Large gaussian -> big projected extent -> eta > 1 -> should split.
@@ -509,9 +511,12 @@ def test_scoring_kernel_flags_large_gaussian(gpu_device) -> None:
 def _read_gaussians(p: TestPipeline, n: int) -> np.ndarray:
     """Read back the first n gaussians as an (n, 14) float array (mean[0:3],
     log_scale[3:6], rot_quat[6:10], opacity[10], sh0[11:14])."""
-    g = np.frombuffer(p.buffers.primitive.values.to_numpy().tobytes(),
-                      dtype=np.float32).reshape(-1, 14)
-    return g[:n]
+    rec = np.frombuffer(p.buffers.primitive.values.to_numpy().tobytes(),
+                        dtype=p.buffers.primitive.layout.dtype)[:n]
+    return np.column_stack([
+        rec["mean"], rec["log_scale"], rec["rot_quat"],
+        rec["opacity"][:, None], rec["sh0"],
+    ])
 
 
 def _read_eta(p: TestPipeline, n: int) -> dict[str, np.ndarray]:
@@ -587,12 +592,14 @@ def test_eta_carried_through_filler_densify(gpu_device) -> None:
     # (mag/65536)/vis; the internal floor is grad_thresh * W*H*3 = 0.0002 *
     # 64*64*3 = ~2.46. Give idx 1,2 avg_grad = 5.0 (>> floor) and idx 0 zero
     # grad (-> KEEP). vis=1 for all live slots.
+    from trainer.backend.memory.buffers import encode_grad_array
     vis = np.zeros(N, dtype=np.uint32); vis[:4] = 1
     p.buffers.densification.visibility_count.copy_from_numpy(vis)
-    mag = np.zeros(N, dtype=np.int64)
-    mag[1] = mag[2] = int(5.0 * 65536.0)   # avg_grad = 5.0 >> ~2.46 floor
-    mag[0] = mag[3] = 0                     # KEEP / (PRUNE decided by opacity)
-    p.buffers.densification.grad_mean_2d_mag.copy_from_numpy(mag)
+    mag = np.zeros(N, dtype=np.float64)
+    mag[1] = mag[2] = 5.0                   # avg_grad = 5.0 >> ~2.46 floor
+    mag[0] = mag[3] = 0.0                   # KEEP / (PRUNE decided by opacity)
+    p.buffers.densification.grad_mean_2d_mag.copy_from_numpy(
+        encode_grad_array(p.buffers.densification.grad_mean_2d_mag, mag))
 
     cfg = DensifyConfig(t_opacity=0.005, t_big_scale=1e9)
     # scale_thresh between the small (0.01) and large (0.30) scales so idx 2

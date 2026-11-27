@@ -95,7 +95,38 @@ class RadixSort:
         self._k = kernels.load(self.KERNELS)
         self.resources = resources
 
-    def sort(self, count: spy.NDBuffer, key_bits: int = 64
+    def prepare_dispatch(self, count: spy.NDBuffer,
+                         known_count: int | None = None) -> None:
+        """Compute indirect dispatch args (and zero global histogram) ahead of :meth:`sort`.
+
+        Calling this before an earlier indirect dispatch lets Metal prefetch ``dispatch_args``
+        on the same flush, eliminating an extra GPU sync. When ``known_count`` is supplied on
+        Metal, ``dispatch_args`` is seeded directly without any GPU readback.
+        """
+        r = self.resources
+        commands = self._commands
+        max_blocks = (r.capacity + RADIX_PART_SIZE - 1) // RADIX_PART_SIZE
+        commands.dispatch(self._k.prepare_dispatch, "radix_prepare_dispatch",
+            thread_count=[1, 1, 1],
+            n_buf=count.storage,
+            dispatch_args=r.dispatch_args.storage,
+            sort_stats=r.stats.storage,
+            max_blocks=max_blocks,
+            max_sort_pairs=r.capacity)
+        commands.dispatch(self._k.init_global_hist, "radix_init_global_hist",
+            thread_count=[RADIX_GLOBAL_HIST_SIZE, 1, 1],
+            b_global_hist=r.global_hist.storage)
+        if commands.batch is not None:
+            if known_count is not None:
+                n = min(max(int(known_count), 0), r.capacity)
+                active_blocks = (n + RADIX_PART_SIZE - 1) // RADIX_PART_SIZE
+                g = min(max(active_blocks, 1), max_blocks)
+                commands.batch.seed_indirect(r.dispatch_args, (g, 1, 1))
+            else:
+                commands.batch.prefetch_indirect(r.dispatch_args)
+
+    def sort(self, count: spy.NDBuffer, key_bits: int = 64, *,
+             args_prepared: bool = False, known_count: int | None = None
              ) -> tuple[spy.NDBuffer, spy.NDBuffer, spy.NDBuffer]:
         """Sort the staged pairs on their low ``key_bits``; return the sorted buffers.
 
@@ -109,16 +140,8 @@ class RadixSort:
         max_blocks = (r.capacity + RADIX_PART_SIZE - 1) // RADIX_PART_SIZE
         key_words = 1 if key_bits <= 32 else 2
 
-        commands.dispatch(self._k.prepare_dispatch, "radix_prepare_dispatch",
-            thread_count=[1, 1, 1],
-            n_buf=count.storage,
-            dispatch_args=r.dispatch_args.storage,
-            sort_stats=r.stats.storage,
-            max_blocks=max_blocks,
-            max_sort_pairs=r.capacity)
-        commands.dispatch(self._k.init_global_hist, "radix_init_global_hist",
-            thread_count=[RADIX_GLOBAL_HIST_SIZE, 1, 1],
-            b_global_hist=r.global_hist.storage)
+        if not args_prepared:
+            self.prepare_dispatch(count, known_count=known_count)
 
         for pass_idx in range((key_bits + 7) // 8):
             radix_shift = (pass_idx % 4) * 8

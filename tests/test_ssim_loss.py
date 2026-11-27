@@ -23,7 +23,7 @@ from trainer.data.dataset import simple_camera
 from trainer.backend.compute.device import create_device
 
 
-BACKENDS = ["vulkan", "d3d12"]
+BACKENDS = ["vulkan", "d3d12", "metal"]
 
 WINDOW_RADIUS = 5
 SIGMA = 1.5

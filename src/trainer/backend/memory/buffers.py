@@ -87,6 +87,7 @@ class PrimitiveStorage:
     active_count: spy.NDBuffer
     filter_3d: spy.NDBuffer
     layout: StructLayout
+    cached_count: int | None = None
 
 
 @dataclass
@@ -292,6 +293,39 @@ class GaussianBuffers:
         return self.sh is not None
 
 
+FIXED_POINT_SCALE = 65536.0
+
+
+def is_float_grad_buffer(buf: spy.NDBuffer) -> bool:
+    """True when ``buf`` stores fp32 gradients (Metal) rather than int64 fixed-point (Vulkan/D3D12)."""
+    n = 1
+    for dim in buf.shape:
+        n *= int(dim)
+    return n > 0 and buf.storage.size == n * 4
+
+
+def decode_grad_buffer(buf: spy.NDBuffer, count: int | None = None) -> np.ndarray:
+    """Read a gradient/accumulator buffer as float64 regardless of backend storage (fp32 vs int64)."""
+    raw = buf.storage.to_numpy().tobytes()
+    if is_float_grad_buffer(buf):
+        vals = np.frombuffer(raw, dtype=np.float32)
+        if count is not None:
+            vals = vals[:count]
+        return vals.astype(np.float64)
+    ints = np.frombuffer(raw, dtype=np.int64)
+    if count is not None:
+        ints = ints[:count]
+    return ints.astype(np.float64) / FIXED_POINT_SCALE
+
+
+def encode_grad_array(buf: spy.NDBuffer, values: np.ndarray) -> np.ndarray:
+    """Encode float gradient values into ``buf``'s backend storage dtype (fp32 vs int64 fixed-point)."""
+    arr = np.asarray(values, dtype=np.float64)
+    if is_float_grad_buffer(buf):
+        return arr.astype(np.float32)
+    return np.round(arr * FIXED_POINT_SCALE).astype(np.int64)
+
+
 @dataclass
 class _ShaderTypes:
     gaussian: object
@@ -300,6 +334,7 @@ class _ShaderTypes:
     adam: object
     sh_moments: object
     gaussian_layout: StructLayout
+    grad_dtype: str = "int64_t"
 
 
 def _reflect_types(module: spy.Module) -> _ShaderTypes:
@@ -310,6 +345,8 @@ def _reflect_types(module: spy.Module) -> _ShaderTypes:
         return slang_type
 
     gaussian = need("Gaussian3D")
+    grad_accum = module.layout.find_type_by_name("GradAccum")
+    grad_stride = int(grad_accum.buffer_layout.reflection.stride) if grad_accum is not None else 8
     return _ShaderTypes(
         gaussian=gaussian,
         projected=need("Projected2DGaussian"),
@@ -317,6 +354,7 @@ def _reflect_types(module: spy.Module) -> _ShaderTypes:
         adam=need("AdamState"),
         sh_moments=need("ShRestMoments"),
         gaussian_layout=StructLayout.of(gaussian),
+        grad_dtype="float" if grad_stride == 4 else "int64_t",
     )
 
 
@@ -479,19 +517,20 @@ def allocate(
         ssim_m2=allocator.tex(spy.Format.rgba32_float, "ssim_m2"),
         ssim_m3=allocator.tex(spy.Format.rgba32_float, "ssim_m3"),
     )
-    grad_params = {name: allocator.i64_buffer(f"grad_buffers[{name}]", max_splats)
+    grad_dtype = getattr(types, "grad_dtype", "int64_t")
+    grad_params = {name: allocator.typed_buffer(f"grad_buffers[{name}]", grad_dtype, max_splats)
                    for name in GRAD_SCALAR_COMPONENTS}
-    grad_seeds = {name: allocator.i64_buffer(f"grad_2d_seed_buffers[{name}]", max_splats)
+    grad_seeds = {name: allocator.typed_buffer(f"grad_2d_seed_buffers[{name}]", grad_dtype, max_splats)
                   for name in GRAD_2D_SEED_COMPONENTS}
     adam_state = allocator.typed_buffer("adam.state", types.adam, max_splats)
 
-    grad_mean_2d_mag = allocator.i64_buffer("densification.grad_mean_2d_mag", max_splats)
+    grad_mean_2d_mag = allocator.typed_buffer("densification.grad_mean_2d_mag", grad_dtype, max_splats)
     visibility_count = allocator.uint_buffer("densification.visibility_count", max_splats)
     blend_weight = allocator.i64_buffer("densification.blend_weight", max_splats)
     gradients = GradientResources(
         params=grad_params, seeds=grad_seeds,
-        screen_x=allocator.i64_buffer("grad_2d_x_iter", max_splats),
-        screen_y=allocator.i64_buffer("grad_2d_y_iter", max_splats),
+        screen_x=allocator.typed_buffer("grad_2d_x_iter", grad_dtype, max_splats),
+        screen_y=allocator.typed_buffer("grad_2d_y_iter", grad_dtype, max_splats),
     )
     filter_3d = allocator.typed_buffer("primitive.filter_3d", "float", max_splats)
     primitive = PrimitiveStorage(primitive_values, active_count, filter_3d, types.gaussian_layout)

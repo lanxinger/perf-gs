@@ -45,8 +45,8 @@ def allocated_bytes(resources: Any) -> dict[str, int]:
 def available_bytes(budget_gib: float, adapter_name: str) -> int | None:
     """Bytes this run may still allocate, or None when no budget is known.
 
-    ``budget_gib`` > 0 overrides the measured (Windows-only) budget; a reserve is held
-    back for driver overhead and allocations the estimate does not count.
+    ``budget_gib`` > 0 overrides the measured (Windows DXGI / macOS Metal) budget; a reserve
+    is held back for driver overhead and allocations the estimate does not count.
     """
     measured = query_video_memory(adapter_name)
     if budget_gib > 0:

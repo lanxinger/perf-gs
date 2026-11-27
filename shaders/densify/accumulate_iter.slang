@@ -10,9 +10,9 @@
 [numthreads(256, 1, 1)]
 void accumulateIter(
     uint3 dtid: SV_DispatchThreadID,
-    RWStructuredBuffer<int64_t> grad_2d_x_iter,
-    RWStructuredBuffer<int64_t> grad_2d_y_iter,
-    RWStructuredBuffer<int64_t> grad_mean_2d_mag_accum,
+    GradBuffer grad_2d_x_iter,
+    GradBuffer grad_2d_y_iter,
+    GradBuffer grad_mean_2d_mag_accum,
     RWStructuredBuffer<uint> visibility_count_accum,
     StructuredBuffer<uint> num_gaussians_counter,
     // Cluster-cull mask: seeded all-ones when disabled.
@@ -26,19 +26,19 @@ void accumulateIter(
     if (i >= num_gaussians_counter[0]) return;
     if (cluster_visible[i / CLUSTER_SIZE] == 0u) return;
 
-    int64_t ix = grad_2d_x_iter[i];
-    int64_t iy = grad_2d_y_iter[i];
+    GradScalar ix = grad_2d_x_iter[i];
+    GradScalar iy = grad_2d_y_iter[i];
 
-    if (ix == int64_t(0) && iy == int64_t(0)) return;
+    if (ix == GradScalar(0) && iy == GradScalar(0)) return;
 
     // Pixel -> NDC units before the norm, matching gsplat's densification signal.
-    float fx = fromFixed(ix) * (frame_dim.x * 0.5);
-    float fy = fromFixed(iy) * (frame_dim.y * 0.5);
+    float fx = fromGrad(ix) * (frame_dim.x * 0.5);
+    float fy = fromGrad(iy) * (frame_dim.y * 0.5);
     float m = sqrt(fx * fx + fy * fy);
 
-    InterlockedAdd(grad_mean_2d_mag_accum[i], toFixed(m));
-    InterlockedAdd(visibility_count_accum[i], 1u);
+    grad_mean_2d_mag_accum[i] += toGrad(m);
+    visibility_count_accum[i] += 1u;
 
-    grad_2d_x_iter[i] = int64_t(0);
-    grad_2d_y_iter[i] = int64_t(0);
+    grad_2d_x_iter[i] = GradScalar(0);
+    grad_2d_y_iter[i] = GradScalar(0);
 }

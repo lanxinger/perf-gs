@@ -5,13 +5,14 @@ packaged or source ``shaders/`` directory on the Slang include path."""
 
 from __future__ import annotations
 
-from pathlib import Path
+import sys
 from importlib.resources import files
+from pathlib import Path
 from typing import Literal
 
 import slangpy as spy
 
-Backend = Literal["vulkan", "d3d12"]
+Backend = Literal["vulkan", "d3d12", "metal"]
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 SHADERS_DIR = Path(str(files("trainer").joinpath("shaders")))
@@ -21,11 +22,19 @@ if not SHADERS_DIR.is_dir():
 _BACKEND_MAP: dict[Backend, spy.DeviceType] = {
     "vulkan": spy.DeviceType.vulkan,
     "d3d12": spy.DeviceType.d3d12,
+    "metal": spy.DeviceType.metal,
 }
+
+# Backend-level macros always preserved across run-specific Slang sessions on the same device.
+BACKEND_DEFINES: frozenset[str] = frozenset({"TRAINER_METAL_BACKEND"})
+
+
+def default_backend() -> Backend:
+    return "metal" if sys.platform == "darwin" else "vulkan"
 
 
 def create_device(
-    backend: Backend = "vulkan",
+    backend: Backend | None = None,
     enable_debug: bool = False,
     shader_debug_info: bool = False,
     defines: dict[str, str] | None = None,
@@ -35,10 +44,16 @@ def create_device(
     ``shader_debug_info`` adds source-line mapping for Nsight without lowering optimization;
     ``defines`` are preprocessor macros injected into every shader compile.
     """
+    if backend is None:
+        backend = default_backend()
     if backend not in _BACKEND_MAP:
         raise ValueError(f"unknown backend {backend!r}; expected one of {list(_BACKEND_MAP)}")
 
-    if not shader_debug_info and not defines:
+    resolved_defines = dict(defines or {})
+    if backend == "metal":
+        resolved_defines.setdefault("TRAINER_METAL_BACKEND", "1")
+
+    if not shader_debug_info and not resolved_defines:
         return spy.create_device(
             type=_BACKEND_MAP[backend],
             enable_debug_layers=enable_debug,
@@ -51,8 +66,8 @@ def create_device(
     }
     if shader_debug_info:
         compiler_options["debug_info"] = spy.SlangDebugInfoLevel.standard
-    if defines:
-        compiler_options["defines"] = dict(defines)
+    if resolved_defines:
+        compiler_options["defines"] = resolved_defines
     return spy.Device(
         type=_BACKEND_MAP[backend],
         enable_debug_layers=enable_debug,
@@ -64,9 +79,16 @@ def create_device(
 def create_slang_session(device: spy.Device, defines: dict[str, str] | None) -> spy.SlangSession:
     """A session compiling like the device's own, but with ``defines`` as its macros."""
     # Copied field by field: desc.compiler_options is the device's live object, not a copy.
+    # Preserve only backend-level macros (e.g. TRAINER_METAL_BACKEND), never run-specific
+    # specializations from the device's initial session.
     own = device.slang_session.desc.compiler_options
+    merged_defines = {
+        k: v for k, v in (own.defines or {}).items() if k in BACKEND_DEFINES
+    }
+    if defines:
+        merged_defines.update(defines)
     return device.create_slang_session(compiler_options=spy.SlangCompilerOptions({
         "include_paths": own.include_paths,
         "debug_info": own.debug_info,
-        "defines": dict(defines or {}),
+        "defines": merged_defines,
     }))

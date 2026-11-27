@@ -16,15 +16,17 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import slangpy as spy
 
 from _pipeline_testkit import TestPipeline
 from trainer.config.config import LossConfig
-from trainer.backend.compute.device import create_device
+from trainer.backend.compute.device import SHADERS_DIR, create_device
 from trainer.backend.memory.buffers import GRAD_SCALAR_COMPONENTS
+from trainer.backend.memory.layout import StructLayout
 from trainer.backend.optimize.adam import AdamOptimizer
 
 
-BACKENDS = ["vulkan", "d3d12"]
+BACKENDS = ["vulkan", "d3d12", "metal"]
 
 # MUST match adam.slang.
 BETA1 = 0.9
@@ -102,14 +104,19 @@ def test_adam_step_matches_reference(backend: str) -> None:
 
     # Known fixed-point gradients, distinct per (component, gaussian) so a
     # mis-wiring (swapped m/v, wrong LR, wrong param slot) shows as a mismatch.
+    from trainer.backend.memory.buffers import decode_grad_buffer, encode_grad_array
     rng = np.random.default_rng(1234)
     grad_raw = {}
     for ci, name in enumerate(GRAD_SCALAR_COMPONENTS):
         vals = (0.5 + 0.13 * ci) + 0.37 * np.arange(N) + rng.uniform(-0.1, 0.1, N)
-        fixed = np.zeros(max_splats, dtype=np.int64)
-        fixed[:N] = np.round(vals * FIXED_SCALE).astype(np.int64)
-        p.buffers.gradients.params[name].copy_from_numpy(fixed)
-        grad_raw[name] = fixed[:N].astype(np.float64) / FIXED_SCALE
+        full = np.zeros(max_splats, dtype=np.float64)
+        full[:N] = vals
+        buf = p.buffers.gradients.params[name]
+        encoded = encode_grad_array(buf, full)
+        buf.copy_from_numpy(encoded)
+        grad_raw[name] = (encoded[:N].astype(np.float64)
+                          if encoded.dtype == np.float32
+                          else encoded[:N].astype(np.float64) / FIXED_SCALE)
 
     lr = dict(mean=1e-3, scale=5e-3, rot=2e-3, opacity=5e-2, color=2.5e-3)
     bc1 = 1.0 - BETA1 ** 5
@@ -131,10 +138,13 @@ def test_adam_step_matches_reference(backend: str) -> None:
     )
     device.wait_for_idle()
 
-    g_out = np.frombuffer(p.buffers.primitive.values.to_numpy().tobytes(),
-                          dtype=np.float32).reshape(-1, 14)[:N].astype(np.float64)
-    # AoS AdamState: 28 floats/gaussian. Pull each channel's m/v moment in
-    # GRAD_SCALAR_COMPONENTS order via the offset tables above.
+    g_rec = np.frombuffer(p.buffers.primitive.values.to_numpy().tobytes(),
+                          dtype=p.buffers.primitive.layout.dtype)[:N]
+    g_out = np.column_stack([
+        g_rec["mean"], g_rec["log_scale"], g_rec["rot_quat"],
+        g_rec["opacity"][:, None], g_rec["sh0"],
+    ]).astype(np.float64)
+    # AoS AdamState: 28 floats/gaussian on all backends (packed on Metal too).
     adam = np.frombuffer(p.buffers.adam.state.to_numpy().tobytes(),
                          dtype=np.float32).reshape(-1, 28)[:N].astype(np.float64)
     m1_out = adam[:, _ADAM_M_IDX]
@@ -162,6 +172,5 @@ def test_adam_step_matches_reference(backend: str) -> None:
 
     # Adam must zero the grad accumulators for the next iteration.
     for name in GRAD_SCALAR_COMPONENTS:
-        raw = np.frombuffer(p.buffers.gradients.params[name].to_numpy().tobytes(),
-                            dtype=np.int64)
-        assert np.all(raw[:N] == 0), f"grad buffer {name} not zeroed after Adam"
+        raw = decode_grad_buffer(p.buffers.gradients.params[name], N)
+        assert np.all(raw == 0), f"grad buffer {name} not zeroed after Adam"

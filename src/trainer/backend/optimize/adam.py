@@ -57,7 +57,32 @@ class AdamOptimizer:
     def reset(self) -> None:
         self.step_count = 0
 
-    def step(self, lrs: AdamLRs, sh_degree: int) -> None:
+    def _seed_or_prefetch_args(self, args: spy.NDBuffer) -> None:
+        batch = self._commands.batch
+        if batch is None:
+            return
+        live = self._primitive.cached_count
+        if live is not None:
+            n = min(max(int(live), 0), self._capacity)
+            groups = (n + 255) // 256 if n > 0 else 0
+            batch.seed_indirect(args, (groups, 1, 1))
+        else:
+            batch.prefetch_indirect(args)
+
+    def prepare_step_args(self) -> None:
+        """Compute indirect dispatch args for ``step`` early so Metal can prefetch them
+        on an earlier flush instead of stalling after the backward pass."""
+        commands = self._commands
+        count = self._primitive.active_count
+        args = self._adam.dispatch_args
+        commands.dispatch(self._k.prepare_args, "adam_prepare_args",
+            thread_count=[1, 1, 1],
+            count_buf=count.storage,
+            dispatch_args=args.storage,
+            max_splats=self._capacity)
+        self._seed_or_prefetch_args(args)
+
+    def step(self, lrs: AdamLRs, sh_degree: int, *, args_prepared: bool = False) -> None:
         self.step_count += 1
         bc1 = 1.0 - _BETA1 ** float(self.step_count)
         bc2 = 1.0 - _BETA2 ** float(self.step_count)
@@ -65,11 +90,14 @@ class AdamOptimizer:
         count = self._primitive.active_count
         args = self._adam.dispatch_args
 
-        commands.dispatch(self._k.prepare_args, "adam_prepare_args",
-            thread_count=[1, 1, 1],
-            count_buf=count.storage,
-            dispatch_args=args.storage,
-            max_splats=self._capacity)
+        if not args_prepared:
+            commands.dispatch(self._k.prepare_args, "adam_prepare_args",
+                thread_count=[1, 1, 1],
+                count_buf=count.storage,
+                dispatch_args=args.storage,
+                max_splats=self._capacity)
+            if self._primitive.cached_count is not None:
+                self._seed_or_prefetch_args(args)
         with commands.marker_group("adam_main"):
             commands.dispatch_indirect(self._k.adam, "adam", args,
                 gaussians=self._primitive.values.storage,
@@ -93,6 +121,8 @@ class AdamOptimizer:
             return
         rest_floats = self._sh.rest_floats
         active_rest = min(sh_rest_coeffs(sh_degree) * 3, rest_floats) if sh_degree else 0
+        if active_rest == 0:
+            return
         with commands.marker_group("adam_rest"):
             commands.dispatch_indirect(self._k.adam_rest, "adam_rest", args,
                 features_rest=self._sh.features_rest.storage,

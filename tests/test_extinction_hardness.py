@@ -33,7 +33,7 @@ from trainer.backend.compute.device import create_device
 # test uses, so this is a like-for-like check with only the compositor changed.
 from test_gradients import _scene, _target, PARAM_TABLE
 
-BACKENDS = ["vulkan", "d3d12"]
+BACKENDS = ["vulkan", "d3d12", "metal"]
 K = 2.0
 
 

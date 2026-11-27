@@ -51,11 +51,14 @@ class PrimitiveIO:
         return self.storage.layout.dtype
 
     def count(self) -> int:
-        return int(self.storage.active_count.to_numpy().view(np.uint32)[0])
+        n = int(self.storage.active_count.to_numpy().view(np.uint32)[0])
+        self.storage.cached_count = n
+        return n
 
     def set_count(self, n: int) -> None:
         assert 0 <= n <= self.capacity, f"primitive count {n} out of range [0, {self.capacity}]"
         self.storage.active_count.copy_from_numpy(np.array([n], dtype=np.uint32))
+        self.storage.cached_count = int(n)
 
     def write(self, records: np.ndarray) -> None:
         """Replace the live primitives with ``records`` (the layout dtype)."""

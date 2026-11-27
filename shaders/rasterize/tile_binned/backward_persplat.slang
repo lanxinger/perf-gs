@@ -17,40 +17,60 @@
 static const uint NUM_WARPS = TILE_AREA / RASTER_BUCKET_SIZE;  // 32-splat buckets per group
 
 // A native wave may hold two independent buckets. Shuffle sources are native lane indices.
-uint bucketWaveLane(uint bucket_lane)
+uint bucketWaveLane(uint wave_lane, uint bucket_lane)
 {
-    return (WaveGetLaneIndex() & ~(RASTER_BUCKET_SIZE - 1u)) + bucket_lane;
+    return (wave_lane & ~(RASTER_BUCKET_SIZE - 1u)) + bucket_lane;
 }
 
 static const float ALPHA_MAX = 0.99;
 static const float ALPHA_MIN_TRACK = 1.0 / 255.0;
 
-// Equivalent gradients: 0 = fused affine-map scan (blendPrefixExclusive), 1 = separate wave scans for A/B.
+// Equivalent gradients:
+//   0 = fused affine-map scan (blendPrefixExclusive, fast on Vulkan/D3D12 SHFL),
+//   1 = separate wave scans for T and rgb C_in_front,
+//   2 = hardware WavePrefixProduct(T) + scalar WavePrefixSum(dot(dLdC, c) * alpha * T),
+//       fastest on Apple Silicon Metal (2 hardware SIMD prefix ops vs 20 cross-lane shuffles).
 #ifndef BACKWARD_BLEND_SCAN_MODE
+#ifdef TRAINER_METAL_BACKEND
+#define BACKWARD_BLEND_SCAN_MODE 2
+#else
 #define BACKWARD_BLEND_SCAN_MODE 0
+#endif
 #endif
 
 #if BACKWARD_BLEND_SCAN_MODE != 0
 // On a 64-lane wave make the lower bucket contribute the identity to the upper bucket's prefix.
-float bucketPrefixProduct(float x)
+float bucketPrefixProduct(float x, uint wave_lane)
 {
     float prefix = WavePrefixProduct(x);
-    if (WaveGetLaneCount() > RASTER_BUCKET_SIZE)
+    if (trainerWaveLaneCount() > RASTER_BUCKET_SIZE)
     {
-        bool upper = WaveGetLaneIndex() >= RASTER_BUCKET_SIZE;
+        bool upper = wave_lane >= RASTER_BUCKET_SIZE;
         float upper_prefix = WavePrefixProduct(upper ? x : 1.0);
         return upper ? upper_prefix : prefix;
     }
     return prefix;
 }
 
-float3 bucketPrefixSum(float3 x)
+float3 bucketPrefixSum(float3 x, uint wave_lane)
 {
     float3 prefix = WavePrefixSum(x);
-    if (WaveGetLaneCount() > RASTER_BUCKET_SIZE)
+    if (trainerWaveLaneCount() > RASTER_BUCKET_SIZE)
     {
-        bool upper = WaveGetLaneIndex() >= RASTER_BUCKET_SIZE;
+        bool upper = wave_lane >= RASTER_BUCKET_SIZE;
         float3 upper_prefix = WavePrefixSum(upper ? x : float3(0.0));
+        return upper ? upper_prefix : prefix;
+    }
+    return prefix;
+}
+
+float bucketPrefixSumScalar(float x, uint wave_lane)
+{
+    float prefix = WavePrefixSum(x);
+    if (trainerWaveLaneCount() > RASTER_BUCKET_SIZE)
+    {
+        bool upper = wave_lane >= RASTER_BUCKET_SIZE;
+        float upper_prefix = WavePrefixSum(upper ? x : 0.0);
         return upper ? upper_prefix : prefix;
     }
     return prefix;
@@ -60,7 +80,8 @@ float3 bucketPrefixSum(float3 x)
 // Exclusive bucket scan of the affine maps T -> T * T_step, S -> S + dLdC_weight * T, where
 // (a1, b1) then (a2, b2) composes to (a1*a2, b1 + a1*b2): one Hillis-Steele pass yields both prefixes.
 // Each of the N components scans one pixel; their shuffle chains are independent and interleave.
-void blendPrefixExclusive<let N : int>(vector<float, N> T_step, vector<float, N> dLdC_weight, uint lane,
+void blendPrefixExclusive<let N : int>(vector<float, N> T_step, vector<float, N> dLdC_weight,
+                                       uint wave_lane, uint lane,
                                        out vector<float, N> T_prefix,
                                        out vector<float, N> dLdC_C_in_front_prefix)
 {
@@ -71,7 +92,7 @@ void blendPrefixExclusive<let N : int>(vector<float, N> T_step, vector<float, N>
     for (uint d = 1u; d < RASTER_BUCKET_SIZE; d <<= 1u)
     {
         // Clamped source is unused when lane < d; all 32 lanes are active (warp-uniform region).
-        uint src = bucketWaveLane((lane >= d) ? (lane - d) : 0u);
+        uint src = bucketWaveLane(wave_lane, (lane >= d) ? (lane - d) : 0u);
         vector<float, N> a_lo = WaveReadLaneAt(a, src);
         vector<float, N> b_lo = WaveReadLaneAt(b, src);
         if (lane >= d)
@@ -87,7 +108,7 @@ void blendPrefixExclusive<let N : int>(vector<float, N> T_step, vector<float, N>
     dLdC_C_in_front_prefix = b - T_prefix * dLdC_weight;
 #else
     // Hardened extinction can drive T_step toward 0, so shift by a lane instead of dividing.
-    uint prev = bucketWaveLane((lane >= 1u) ? (lane - 1u) : 0u);
+    uint prev = bucketWaveLane(wave_lane, (lane >= 1u) ? (lane - 1u) : 0u);
     vector<float, N> a_prev = WaveReadLaneAt(a, prev);
     vector<float, N> b_prev = WaveReadLaneAt(b, prev);
     T_prefix        = (lane >= 1u) ? a_prev : vector<float, N>(1.0);
@@ -95,11 +116,11 @@ void blendPrefixExclusive<let N : int>(vector<float, N> T_step, vector<float, N>
 #endif
 }
 
-void blendPrefixExclusive(float T_step, float dLdC_weight, uint lane,
+void blendPrefixExclusive(float T_step, float dLdC_weight, uint wave_lane, uint lane,
                           out float T_prefix, out float dLdC_C_in_front_prefix)
 {
     vector<float, 1> t, s;
-    blendPrefixExclusive<1>(vector<float, 1>(T_step), vector<float, 1>(dLdC_weight), lane, t, s);
+    blendPrefixExclusive<1>(vector<float, 1>(T_step), vector<float, 1>(dLdC_weight), wave_lane, lane, t, s);
     T_prefix = t.x;
     dLdC_C_in_front_prefix = s.x;
 }
@@ -155,24 +176,24 @@ void backwardRasterizePerSplat(
     StructuredBuffer<uint> bucket_offsets,
     StructuredBuffer<uint2> raster_checkpoints,
     StructuredBuffer<CameraData> camera,
-    RWTexture2D<float4> output_image,
-    RWTexture2D<uint> gaussian_count_per_pixel,
-    RWTexture2D<float4> dL_dC_texture,
+    Texture2D<float4> output_image,
+    Texture2D<uint> gaussian_count_per_pixel,
+    Texture2D<float4> dL_dC_texture,
     // Tile-summed BlendData seeds for projection_backward.slang; the color grads below are final.
-    RWStructuredBuffer<int64_t> grad_mean2d_x,
-    RWStructuredBuffer<int64_t> grad_mean2d_y,
-    RWStructuredBuffer<int64_t> grad_conic_a,
-    RWStructuredBuffer<int64_t> grad_conic_b,
-    RWStructuredBuffer<int64_t> grad_conic_c,
-    RWStructuredBuffer<int64_t> grad_amplitude,
-    RWStructuredBuffer<int64_t> grad_opacity,   // opaque_core's direct falloff term only
-    RWStructuredBuffer<int64_t> grad_color_r,
-    RWStructuredBuffer<int64_t> grad_color_g,
-    RWStructuredBuffer<int64_t> grad_color_b,
-    RWStructuredBuffer<int64_t> grad_2d_x_iter,
-    RWStructuredBuffer<int64_t> grad_2d_y_iter,
+    AtomicGradBuffer grad_mean2d_x,
+    AtomicGradBuffer grad_mean2d_y,
+    AtomicGradBuffer grad_conic_a,
+    AtomicGradBuffer grad_conic_b,
+    AtomicGradBuffer grad_conic_c,
+    AtomicGradBuffer grad_amplitude,
+    AtomicGradBuffer grad_opacity,   // opaque_core's direct falloff term only
+    AtomicGradBuffer grad_color_r,
+    AtomicGradBuffer grad_color_g,
+    AtomicGradBuffer grad_color_b,
+    AtomicGradBuffer grad_2d_x_iter,
+    AtomicGradBuffer grad_2d_y_iter,
     // Densify-window sum of each splat's blend weight alpha * T; written only when track_blend_weight != 0.
-    RWStructuredBuffer<int64_t> blend_weight_accum,
+    AtomicI64Buffer blend_weight_accum,
     uniform uint track_blend_weight,
     // Screen-gradient tracking for densification (grad_2d_*_iter); off once densification ends.
     uniform uint track_screen_grad,
@@ -260,7 +281,8 @@ void backwardRasterizePerSplat(
     GroupMemoryBarrierWithGroupSync();
     uint max_processed = gs_max_processed;
 
-    uint lane = WaveGetLaneIndex() % RASTER_BUCKET_SIZE;
+    uint wave_lane = trainerWaveLaneIndex(tid);
+    uint lane = wave_lane % RASTER_BUCKET_SIZE;
     uint warp_idx = tid / RASTER_BUCKET_SIZE;
     // Truncate to the buckets some pixel actually reached (vs. tile_count).
     uint num_buckets = (max_processed + RASTER_BUCKET_SIZE - 1u) / RASTER_BUCKET_SIZE;
@@ -383,20 +405,26 @@ void backwardRasterizePerSplat(
             // dL_dC is warp-uniform, so dot(dL_dC, .) commutes through the prefix sum: a scalar scan suffices.
             float dLdC_weight = dot(dL_dC, c_i) * comp.weight(alpha);   // 0 when masked
             float T_prefix, dLdC_C_in_front_prefix;
-            blendPrefixExclusive(T_step, dLdC_weight, lane, T_prefix, dLdC_C_in_front_prefix);
+            blendPrefixExclusive(T_step, dLdC_weight, wave_lane, lane, T_prefix, dLdC_C_in_front_prefix);
             float T_i     = T_checkpoint * T_prefix;                   // pre-splat transmittance
             float alpha_T = comp.weight(alpha) * T_i;          // this splat's blend weight
             // dot(dL_dC, c_i * alpha * T_i): this splat's share of dot(dL_dC, C_in_front_incl).
             float dLdC_contrib = dLdC_weight * T_i;
             // dot(dL_dC, C_in_front_excl(i)) = dot(dL_dC, C_checkpoint) + prefixsum.
             float dLdC_C_in_front = dot(dL_dC, C_checkpoint) + T_checkpoint * dLdC_C_in_front_prefix;   // exclusive
+#elif BACKWARD_BLEND_SCAN_MODE == 2
+            float T_prefix = bucketPrefixProduct(T_step, wave_lane);
+            float T_i     = T_checkpoint * T_prefix;
+            float alpha_T = comp.weight(alpha) * T_i;          // this splat's blend weight
+            float dLdC_contrib = dot(dL_dC, c_i) * alpha_T;
+            float dLdC_C_in_front = dot(dL_dC, C_checkpoint) + bucketPrefixSumScalar(dLdC_contrib, wave_lane);
 #else
-            float T_prefix = bucketPrefixProduct(T_step);
+            float T_prefix = bucketPrefixProduct(T_step, wave_lane);
             float T_i     = T_checkpoint * T_prefix;
             float alpha_T = comp.weight(alpha) * T_i;          // this splat's blend weight
             float3 contrib = c_i * alpha_T;                    // 0 when masked
             // C_in_front(i) = C_checkpoint + sum of contrib for lower lanes.
-            float3 C_in_front = C_checkpoint + bucketPrefixSum(contrib);
+            float3 C_in_front = C_checkpoint + bucketPrefixSum(contrib, wave_lane);
 #endif
 
             if (contributes)
@@ -411,7 +439,7 @@ void backwardRasterizePerSplat(
                 acc_color += dL_dC * alpha_T;
                 acc_weight += alpha_T;
 
-#if BACKWARD_BLEND_SCAN_MODE == 0
+#if BACKWARD_BLEND_SCAN_MODE == 0 || BACKWARD_BLEND_SCAN_MODE == 2
                 // dot(dL_dC, C_behind) with C_behind = C_total - C_in_front(i) - c_i * alpha_i * T_i.
                 float dLdC_Cbehind = dot(dL_dC, C_total) - dLdC_C_in_front - dLdC_contrib;
                 // The compositor owns the alpha-over vs hardened-extinction math.
@@ -465,26 +493,26 @@ void backwardRasterizePerSplat(
             {
                 // STBN visited visit_count of the tile's pixels; scale to all.
                 float coverage = float(TILE_AREA) / float(max(visit_count, 1u));
-                InterlockedAdd(blend_weight_accum[g_idx], toFixed(acc_weight * coverage));
+                atomicAddI64(blend_weight_accum, g_idx, toFixed(acc_weight * coverage));
             }
 
             // projection_backward.slang applies J^T once per gaussian to these tile sums.
-            InterlockedAdd(grad_mean2d_x[g_idx], toFixed(acc_mean2d.x));
-            InterlockedAdd(grad_mean2d_y[g_idx], toFixed(acc_mean2d.y));
-            InterlockedAdd(grad_conic_a[g_idx], toFixed(acc_conic.x));
-            InterlockedAdd(grad_conic_b[g_idx], toFixed(acc_conic.y));
-            InterlockedAdd(grad_conic_c[g_idx], toFixed(acc_conic.z));
-            InterlockedAdd(grad_amplitude[g_idx], toFixed(acc_amplitude));
+            atomicAddGrad(grad_mean2d_x, g_idx, acc_mean2d.x);
+            atomicAddGrad(grad_mean2d_y, g_idx, acc_mean2d.y);
+            atomicAddGrad(grad_conic_a, g_idx, acc_conic.x);
+            atomicAddGrad(grad_conic_b, g_idx, acc_conic.y);
+            atomicAddGrad(grad_conic_c, g_idx, acc_conic.z);
+            atomicAddGrad(grad_amplitude, g_idx, acc_amplitude);
 #if SPLAT_KERNEL == 3
-            InterlockedAdd(grad_opacity[g_idx], toFixed(acc_opacity));
+            atomicAddGrad(grad_opacity, g_idx, acc_opacity);
 #endif
-            InterlockedAdd(grad_color_r[g_idx], toFixed(acc_color.x));
-            InterlockedAdd(grad_color_g[g_idx], toFixed(acc_color.y));
-            InterlockedAdd(grad_color_b[g_idx], toFixed(acc_color.z));
+            atomicAddGrad(grad_color_r, g_idx, acc_color.x);
+            atomicAddGrad(grad_color_g, g_idx, acc_color.y);
+            atomicAddGrad(grad_color_b, g_idx, acc_color.z);
             if (track_screen_grad != 0u)
             {
-                InterlockedAdd(grad_2d_x_iter[g_idx], toFixed(acc_absx));
-                InterlockedAdd(grad_2d_y_iter[g_idx], toFixed(acc_absy));
+                atomicAddGrad(grad_2d_x_iter, g_idx, acc_absx);
+                atomicAddGrad(grad_2d_y_iter, g_idx, acc_absy);
             }
         }
 
@@ -508,22 +536,22 @@ void backwardRasterizePerBucket(
     StructuredBuffer<uint> live_bucket_total,    // [1]: number of live buckets
     StructuredBuffer<uint2> raster_checkpoints,
     StructuredBuffer<CameraData> camera,
-    RWTexture2D<float4> output_image,
-    RWTexture2D<uint> gaussian_count_per_pixel,
-    RWTexture2D<float4> dL_dC_texture,
-    RWStructuredBuffer<int64_t> grad_mean2d_x,
-    RWStructuredBuffer<int64_t> grad_mean2d_y,
-    RWStructuredBuffer<int64_t> grad_conic_a,
-    RWStructuredBuffer<int64_t> grad_conic_b,
-    RWStructuredBuffer<int64_t> grad_conic_c,
-    RWStructuredBuffer<int64_t> grad_amplitude,
-    RWStructuredBuffer<int64_t> grad_opacity,
-    RWStructuredBuffer<int64_t> grad_color_r,
-    RWStructuredBuffer<int64_t> grad_color_g,
-    RWStructuredBuffer<int64_t> grad_color_b,
-    RWStructuredBuffer<int64_t> grad_2d_x_iter,
-    RWStructuredBuffer<int64_t> grad_2d_y_iter,
-    RWStructuredBuffer<int64_t> blend_weight_accum,
+    Texture2D<float4> output_image,
+    Texture2D<uint> gaussian_count_per_pixel,
+    Texture2D<float4> dL_dC_texture,
+    AtomicGradBuffer grad_mean2d_x,
+    AtomicGradBuffer grad_mean2d_y,
+    AtomicGradBuffer grad_conic_a,
+    AtomicGradBuffer grad_conic_b,
+    AtomicGradBuffer grad_conic_c,
+    AtomicGradBuffer grad_amplitude,
+    AtomicGradBuffer grad_opacity,
+    AtomicGradBuffer grad_color_r,
+    AtomicGradBuffer grad_color_g,
+    AtomicGradBuffer grad_color_b,
+    AtomicGradBuffer grad_2d_x_iter,
+    AtomicGradBuffer grad_2d_y_iter,
+    AtomicI64Buffer blend_weight_accum,
     uniform uint track_blend_weight,
     uniform uint track_screen_grad,
     uniform uint pixel_phase,
@@ -536,7 +564,8 @@ void backwardRasterizePerBucket(
     uniform float extinction_hardness)
 {
     uint tid = gtid.x;
-    uint lane = WaveGetLaneIndex() % RASTER_BUCKET_SIZE;
+    uint wave_lane = trainerWaveLaneIndex(tid);
+    uint lane = wave_lane % RASTER_BUCKET_SIZE;
     uint warp_idx = tid / RASTER_BUCKET_SIZE;
 
     // Tail warps (slot >= live_total) must still reach the staging barrier, so they return after it.
@@ -696,7 +725,7 @@ void backwardRasterizePerBucket(
             uint2 local = pixel[j] - origin;
             uint index = local.y * TILE_WIDTH + local.x;
             float gain = WaveReadLaneAt(index < RASTER_BUCKET_SIZE ? gainPair.x : gainPair.y,
-                                        bucketWaveLane(index % RASTER_BUCKET_SIZE));
+                                        bucketWaveLane(wave_lane, index % RASTER_BUCKET_SIZE));
             dLdC4[j].rgb *= gain;
             C_total[j].rgb /= gain;  // Checkpoints and splat colors are in scene space.
             dLdC_c[j] = dot(dLdC4[j].rgb, c_i);
@@ -721,12 +750,12 @@ void backwardRasterizePerBucket(
 
 #if BACKWARD_BLEND_SCAN_MODE == 0
         PixelStepVector T_prefix, dLdC_C_in_front_prefix;
-        blendPrefixExclusive(T_step, dLdC_weight, lane, T_prefix, dLdC_C_in_front_prefix);
+        blendPrefixExclusive(T_step, dLdC_weight, wave_lane, lane, T_prefix, dLdC_C_in_front_prefix);
 #else
         PixelStepVector T_prefix;
         [unroll]
         for (uint j = 0u; j < PIXELS_PER_STEP; ++j)
-            T_prefix[j] = bucketPrefixProduct(T_step[j]);
+            T_prefix[j] = bucketPrefixProduct(T_step[j], wave_lane);
 #endif
 
         [unroll]
@@ -737,9 +766,12 @@ void backwardRasterizePerBucket(
 #if BACKWARD_BLEND_SCAN_MODE == 0
             float dLdC_contrib = dLdC_weight[j] * T_i;
             float dLdC_C_in_front = dLdC_C_checkpoint[j] + T_checkpoint[j] * dLdC_C_in_front_prefix[j];
+#elif BACKWARD_BLEND_SCAN_MODE == 2
+            float dLdC_contrib = dLdC_weight[j] * T_i;
+            float dLdC_C_in_front = dLdC_C_checkpoint[j] + bucketPrefixSumScalar(dLdC_contrib, wave_lane);
 #else
             float3 contrib = c_i * alpha_T;
-            float3 C_in_front = C_checkpoint[j] + bucketPrefixSum(contrib);
+            float3 C_in_front = C_checkpoint[j] + bucketPrefixSum(contrib, wave_lane);
 #endif
 
             if (contributes[j])
@@ -749,7 +781,7 @@ void backwardRasterizePerBucket(
                 acc_color += dLdC4[j].rgb * alpha_T;
                 acc_weight += alpha_T;
 
-#if BACKWARD_BLEND_SCAN_MODE == 0
+#if BACKWARD_BLEND_SCAN_MODE == 0 || BACKWARD_BLEND_SCAN_MODE == 2
                 float dLdC_Cbehind = dot(dLdC4[j].rgb, C_total[j].rgb) - dLdC_C_in_front - dLdC_contrib;
                 float dL_dalpha = comp.coverageGrad(alpha[j], dLdC_c[j], T_i, dLdC_Cbehind, dLdC4[j].a,
                                                     T_final);
@@ -797,24 +829,24 @@ void backwardRasterizePerBucket(
         if (track_blend_weight != 0u)
         {
             float coverage = float(TILE_AREA) / float(max(visit_count, 1u));
-            InterlockedAdd(blend_weight_accum[g_idx], toFixed(acc_weight * coverage));
+            atomicAddI64(blend_weight_accum, g_idx, toFixed(acc_weight * coverage));
         }
-        InterlockedAdd(grad_mean2d_x[g_idx], toFixed(acc_mean2d.x));
-        InterlockedAdd(grad_mean2d_y[g_idx], toFixed(acc_mean2d.y));
-        InterlockedAdd(grad_conic_a[g_idx], toFixed(acc_conic.x));
-        InterlockedAdd(grad_conic_b[g_idx], toFixed(acc_conic.y));
-        InterlockedAdd(grad_conic_c[g_idx], toFixed(acc_conic.z));
-        InterlockedAdd(grad_amplitude[g_idx], toFixed(acc_amplitude));
+        atomicAddGrad(grad_mean2d_x, g_idx, acc_mean2d.x);
+        atomicAddGrad(grad_mean2d_y, g_idx, acc_mean2d.y);
+        atomicAddGrad(grad_conic_a, g_idx, acc_conic.x);
+        atomicAddGrad(grad_conic_b, g_idx, acc_conic.y);
+        atomicAddGrad(grad_conic_c, g_idx, acc_conic.z);
+        atomicAddGrad(grad_amplitude, g_idx, acc_amplitude);
 #if SPLAT_KERNEL == 3
-        InterlockedAdd(grad_opacity[g_idx], toFixed(acc_opacity));
+        atomicAddGrad(grad_opacity, g_idx, acc_opacity);
 #endif
-        InterlockedAdd(grad_color_r[g_idx], toFixed(acc_color.x));
-        InterlockedAdd(grad_color_g[g_idx], toFixed(acc_color.y));
-        InterlockedAdd(grad_color_b[g_idx], toFixed(acc_color.z));
+        atomicAddGrad(grad_color_r, g_idx, acc_color.x);
+        atomicAddGrad(grad_color_g, g_idx, acc_color.y);
+        atomicAddGrad(grad_color_b, g_idx, acc_color.z);
         if (track_screen_grad != 0u)
         {
-            InterlockedAdd(grad_2d_x_iter[g_idx], toFixed(acc_absx));
-            InterlockedAdd(grad_2d_y_iter[g_idx], toFixed(acc_absy));
+            atomicAddGrad(grad_2d_x_iter, g_idx, acc_absx);
+            atomicAddGrad(grad_2d_y_iter, g_idx, acc_absy);
         }
     }
 }

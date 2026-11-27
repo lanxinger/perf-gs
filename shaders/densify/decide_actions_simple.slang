@@ -18,7 +18,7 @@ void decideActionsSimple(
     uint3 dtid: SV_DispatchThreadID,
     StructuredBuffer<Gaussian3D> gaussians,
     StructuredBuffer<uint> num_gaussians_counter,
-    StructuredBuffer<int64_t> grad_mean_2d_mag_accum,
+    ReadGradBuffer grad_mean_2d_mag_accum,
     StructuredBuffer<uint> visibility_count_accum,
     StructuredBuffer<int64_t> blend_weight_accum,
     RWStructuredBuffer<uint> action,
@@ -71,7 +71,7 @@ void decideActionsSimple(
     
     float avg_grad = 0.0;
     if (vis > 0)
-        avg_grad = fromFixed(grad_mean_2d_mag_accum[i]) / float(vis);
+        avg_grad = fromGrad(grad_mean_2d_mag_accum[i]) / float(vis);
 
     if (avg_grad > grad_thresh)
     {

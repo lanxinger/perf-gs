@@ -54,22 +54,22 @@ void backwardRasterize(
     RWTexture2D<float4> output_image,
     RWTexture2D<uint> gaussian_count_per_pixel,
     RWTexture2D<float4> dL_dC_texture,
-    RWStructuredBuffer<int64_t> grad_mean_x,
-    RWStructuredBuffer<int64_t> grad_mean_y,
-    RWStructuredBuffer<int64_t> grad_mean_z,
-    RWStructuredBuffer<int64_t> grad_log_scale_x,
-    RWStructuredBuffer<int64_t> grad_log_scale_y,
-    RWStructuredBuffer<int64_t> grad_log_scale_z,
-    RWStructuredBuffer<int64_t> grad_rot_w,
-    RWStructuredBuffer<int64_t> grad_rot_x,
-    RWStructuredBuffer<int64_t> grad_rot_y,
-    RWStructuredBuffer<int64_t> grad_rot_z,
-    RWStructuredBuffer<int64_t> grad_opacity,
-    RWStructuredBuffer<int64_t> grad_color_r,
-    RWStructuredBuffer<int64_t> grad_color_g,
-    RWStructuredBuffer<int64_t> grad_color_b,
-    RWStructuredBuffer<int64_t> grad_2d_x_iter,
-    RWStructuredBuffer<int64_t> grad_2d_y_iter)
+    AtomicGradBuffer grad_mean_x,
+    AtomicGradBuffer grad_mean_y,
+    AtomicGradBuffer grad_mean_z,
+    AtomicGradBuffer grad_log_scale_x,
+    AtomicGradBuffer grad_log_scale_y,
+    AtomicGradBuffer grad_log_scale_z,
+    AtomicGradBuffer grad_rot_w,
+    AtomicGradBuffer grad_rot_x,
+    AtomicGradBuffer grad_rot_y,
+    AtomicGradBuffer grad_rot_z,
+    AtomicGradBuffer grad_opacity,
+    AtomicGradBuffer grad_color_r,
+    AtomicGradBuffer grad_color_g,
+    AtomicGradBuffer grad_color_b,
+    AtomicGradBuffer grad_2d_x_iter,
+    AtomicGradBuffer grad_2d_y_iter)
 {
     uint2 pixel = dtid.xy;
     uint tid = gtid.y * TILE_WIDTH + gtid.x;
@@ -265,23 +265,22 @@ void backwardRasterize(
         if (tid < NUM_ATOMICS)
         {
             float v = gs_atomic[tid];
-            int64_t fx = toFixed(v);
-            if      (tid == 0)  InterlockedAdd(grad_opacity[g_idx],     fx);
-            else if (tid == 1)  InterlockedAdd(grad_color_r[g_idx],     fx);
-            else if (tid == 2)  InterlockedAdd(grad_color_g[g_idx],     fx);
-            else if (tid == 3)  InterlockedAdd(grad_color_b[g_idx],     fx);
-            else if (tid == 4)  InterlockedAdd(grad_2d_x_iter[g_idx],   fx);
-            else if (tid == 5)  InterlockedAdd(grad_2d_y_iter[g_idx],   fx);
-            else if (tid == 6)  InterlockedAdd(grad_mean_x[g_idx],      fx);
-            else if (tid == 7)  InterlockedAdd(grad_mean_y[g_idx],      fx);
-            else if (tid == 8)  InterlockedAdd(grad_mean_z[g_idx],      fx);
-            else if (tid == 9)  InterlockedAdd(grad_log_scale_x[g_idx], fx);
-            else if (tid == 10) InterlockedAdd(grad_log_scale_y[g_idx], fx);
-            else if (tid == 11) InterlockedAdd(grad_log_scale_z[g_idx], fx);
-            else if (tid == 12) InterlockedAdd(grad_rot_w[g_idx],       fx);
-            else if (tid == 13) InterlockedAdd(grad_rot_x[g_idx],       fx);
-            else if (tid == 14) InterlockedAdd(grad_rot_y[g_idx],       fx);
-            else if (tid == 15) InterlockedAdd(grad_rot_z[g_idx],       fx);
+            if      (tid == 0)  atomicAddGrad(grad_opacity,     g_idx, v);
+            else if (tid == 1)  atomicAddGrad(grad_color_r,     g_idx, v);
+            else if (tid == 2)  atomicAddGrad(grad_color_g,     g_idx, v);
+            else if (tid == 3)  atomicAddGrad(grad_color_b,     g_idx, v);
+            else if (tid == 4)  atomicAddGrad(grad_2d_x_iter,   g_idx, v);
+            else if (tid == 5)  atomicAddGrad(grad_2d_y_iter,   g_idx, v);
+            else if (tid == 6)  atomicAddGrad(grad_mean_x,      g_idx, v);
+            else if (tid == 7)  atomicAddGrad(grad_mean_y,      g_idx, v);
+            else if (tid == 8)  atomicAddGrad(grad_mean_z,      g_idx, v);
+            else if (tid == 9)  atomicAddGrad(grad_log_scale_x, g_idx, v);
+            else if (tid == 10) atomicAddGrad(grad_log_scale_y, g_idx, v);
+            else if (tid == 11) atomicAddGrad(grad_log_scale_z, g_idx, v);
+            else if (tid == 12) atomicAddGrad(grad_rot_w,       g_idx, v);
+            else if (tid == 13) atomicAddGrad(grad_rot_x,       g_idx, v);
+            else if (tid == 14) atomicAddGrad(grad_rot_y,       g_idx, v);
+            else if (tid == 15) atomicAddGrad(grad_rot_z,       g_idx, v);
         }
 
         GroupMemoryBarrierWithGroupSync();

@@ -144,12 +144,23 @@ class ViewerSession:
         self._viewer.start()
         print("[viewer] render thread started.", flush=True)
 
+    def run_blocking(self) -> None:
+        """Run the viewer loop on the current thread (used on macOS main thread)."""
+        if self._viewer is None:
+            return
+        print("[viewer] running render loop on main thread.", flush=True)
+        self._viewer.run_blocking()
+
+    def call_on_ui_thread(self, fn):
+        if self._viewer is None:
+            return fn()
+        return self._viewer.call_on_ui_thread(fn)
+
     def is_alive(self) -> bool:
-        """Whether the render thread has been started and is still running."""
+        """Whether the viewer loop has been started and is still running."""
         if self._viewer is None:
             return False
-        thread = self._viewer._thread
-        return thread is not None and thread.is_alive()
+        return self._viewer.is_alive()
 
     def wait_for_start(self) -> None:
         """Block until the viewer's 'Start Training' button, Enter in this terminal, or the window closing."""

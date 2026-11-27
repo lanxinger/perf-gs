@@ -80,9 +80,88 @@ def test_a_run_compiles_in_the_session_of_its_own_specialization() -> None:
     opaque = shader_specialization(_parse("--hub", "--splat-kernel", "opaque_core"))
     session = sessions.session_for(opaque)
     assert session is not device.slang_session
-    assert session.desc.compiler_options.defines == shader_defines(opaque)
+    user_defines = {k: v for k, v in session.desc.compiler_options.defines.items()
+                    if k != "TRAINER_METAL_BACKEND"}
+    assert user_defines == shader_defines(opaque)
     assert sessions.session_for(opaque) is session
+
+    # Disabling macros present on the initial device (hardness=1, bf16) must drop them
+    # rather than silently inheriting obsolete specializations from own.defines.
+    plain = shader_specialization(
+        _parse("--hub", "--extinction-hardness", "2", "--adam-moments", "fp32"))
+    plain_session = sessions.session_for(plain)
+    plain_defines = dict(plain_session.desc.compiler_options.defines)
+    if device.info.type.name == "metal":
+        assert plain_defines == {"TRAINER_METAL_BACKEND": "1"}
+    else:
+        assert plain_defines == {}
     device.close()
+
+
+def test_run_training_and_post_can_publish_completion_without_holding_viewer(tmp_path) -> None:
+    """macOS CLI viewer runs training on a worker thread (hold_viewer=False) while still
+    needing training_completed published to transition the open window out of RUNNING."""
+    from types import SimpleNamespace
+    from trainer.frontend.app import TrainingApplication
+    from trainer.frontend.viewer.session import Session, TrainingState
+
+    def _run(publish_completion: bool | None) -> tuple[Session, list[str]]:
+        state = Session()
+        state.training_initializing(target_iterations=10)
+        state.training_running()
+        state.publish_training(gaussians=42)
+        held: list[str] = []
+        viewer = SimpleNamespace(
+            state=state,
+            finish_training=lambda _p: None,
+            unthrottled=lambda: __import__("contextlib").nullcontext(),
+            checkpoint=lambda: None,
+            hold_after_training=lambda _p: held.append("held"),
+        )
+        artifacts = SimpleNamespace(
+            log_json=SimpleNamespace(write=lambda _s: None),
+            close_all=lambda: None,
+        )
+        app = TrainingApplication.__new__(TrainingApplication)
+        app.args = _parse("--iters", "10", "--no-evaluation")
+        app.paths = SimpleNamespace(root=tmp_path, cameras=tmp_path)
+        app.scene_context = SimpleNamespace(
+            colmapScene=None, test_indices=[], holdout_stride=8, camera_count=1)
+        app.targets = SimpleNamespace(srgb=None, linear=None)
+        app.runtime = SimpleNamespace(
+            viewer=viewer, pipeline=object(), profiler=None, artifacts=artifacts)
+        app._report_memory = lambda: {}
+        app._write_final_test_psnr = lambda _r: None
+        app.build_training_loop = lambda: SimpleNamespace(
+            launch_training_loop=lambda: SimpleNamespace(
+                iterations=10, wall_time_seconds=1.25, started_at=0.0,
+                stop_reason="completed", psnr_curve=[]))
+        # Skip post-training file I/O in this unit test.
+        import trainer.frontend.app as app_mod
+        orig_post = app_mod.run_post_training
+        app_mod.run_post_training = lambda **_kw: None
+        try:
+            if publish_completion is None:
+                app._run_training_and_post(hold_viewer=False)
+            else:
+                app._run_training_and_post(hold_viewer=False, publish_completion=publish_completion)
+        finally:
+            app_mod.run_post_training = orig_post
+        return state, held
+
+    # Default hold_viewer=False (Hub path): controller publishes completion, not _run_training_and_post.
+    hub_state, hub_held = _run(None)
+    assert hub_held == []
+    assert hub_state.snapshot().training_state == TrainingState.RUNNING
+
+    # macOS CLI viewer path: publishes completion without blocking in hold_after_training.
+    cli_state, cli_held = _run(True)
+    assert cli_held == []
+    snap = cli_state.snapshot()
+    assert snap.training_state == TrainingState.COMPLETED
+    assert snap.result is not None
+    assert snap.result.iterations == 10
+    assert snap.result.splats == 42
 
 
 def test_position_lr_horizon_follows_iters_unless_overridden() -> None:
@@ -109,7 +188,7 @@ def test_device_factory_passes_resolved_specialization(monkeypatch) -> None:
 
     assert create_training_device(args) is sentinel
     assert captured == {
-        "backend": "vulkan",
+        "backend": "metal" if __import__("sys").platform == "darwin" else "vulkan",
         # --nsight-debug-names defaults to off unless --capture-external.
         "enable_debug": False,
         "shader_debug_info": False,

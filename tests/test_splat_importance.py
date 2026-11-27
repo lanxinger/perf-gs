@@ -31,7 +31,7 @@ def _alpha(pipeline: TestPipeline, camera, splats: dict) -> np.ndarray:
     return pipeline.read_output_image()[..., 3].astype(np.float64)
 
 
-@pytest.mark.parametrize("backend", ["vulkan", "d3d12"])
+@pytest.mark.parametrize("backend", ["vulkan", "d3d12", "metal"])
 def test_red_sh_gradient_matches_visible_blend_weight(backend: str) -> None:
     try:
         device = create_device(backend=backend)

@@ -2,11 +2,11 @@
 
 [![Project Page](https://img.shields.io/badge/Project-Page-blue.svg)](https://electronicarts.github.io/perf-gs/)
 [![Languages: Python and Slang](https://img.shields.io/badge/languages-Python%20%2B%20Slang-CF7434)](#architecture-from-a-high-level)
-[![Backends: Vulkan and D3D12](https://img.shields.io/badge/backends-Vulkan%20%2B%20D3D12-355B3E)](#requirements)
+[![Backends: Vulkan, D3D12 and Metal](https://img.shields.io/badge/backends-Vulkan%20%2B%20D3D12%20%2B%20Metal-355B3E)](#requirements)
 
 **Efficient, extensible, dependency-free & low memory differentiable training in 10 seconds on an RTX 4090.**
 
-Run COLMAP on a folder of photos directly in the PERF-GS standalone app, or open an existing COLMAP scene. Then train a 3D Gaussian Splatting model with Slang on Vulkan or D3D12.<br>
+Run COLMAP on a folder of photos directly in the PERF-GS standalone app, or open an existing COLMAP scene. Then train a 3D Gaussian Splatting model with Slang on Vulkan, D3D12, or Metal (Apple Silicon).<br>
 On an **RTX 4090**:
 - *Quality* preset averages **27.90 dB PSNR in 22.68 seconds** across the nine Mip-NeRF 360 scenes.
 - *Ultrafast* preset averages **27.13 dB in 10.51 seconds** on the same card.<br>
@@ -53,7 +53,7 @@ Python picks a training camera, sets the learning rates and decides when to grow
 
 A *primitive* supplies its projection, its coverage at a pixel, and its color. The *compositor* takes care of blending it over what's behind it. With Slang.D we can mark the projection and coverage functions as differentiable. Change the math in one of those functions and Slang generates its derivatives from the same source. For performance reasons, we still need to write the outer shell's backward passes ourselves. There's a small disk primitive in the tests that uses the same forward blend loop with its own coverage function. [Primitive interfaces](https://github.com/electronicarts/perf-gs/blob/HEAD/shaders/core/interfaces.slang) - [Disk primitive test](https://github.com/electronicarts/perf-gs/blob/HEAD/tests/test_disk_primitive.py)
 
-Vulkan is the cross-platform target. D3D12 on Windows uses the same shader sources. Training has no CUDA or PyTorch dependency. One detail that mattered across vendors was wave size. We've run Vulkan training on Windows with the Nvidia RTX 4050 Laptop GPU, Nvidia RTX 4080, Nvidia RTX 4090 and AMD Radeon RX 7900 XT. Linux and macOS are unverified, yet.
+Vulkan is the cross-platform target. D3D12 on Windows and Metal on Apple Silicon macOS use the same shader sources. Training has no CUDA or PyTorch dependency. One detail that mattered across vendors was wave size (32-lane on NVIDIA/Apple Silicon, 64-lane on AMD). We've run training on Windows (Vulkan/D3D12) with the Nvidia RTX 4050 Laptop GPU, Nvidia RTX 4080, Nvidia RTX 4090 and AMD Radeon RX 7900 XT, and on macOS (Metal) with Apple M4 Pro. Linux is unverified yet.
 
 <a name="where-the-first-splats-come-from"></a>
 
@@ -124,9 +124,9 @@ This runs Quality's 3,500 steps and continues with the model it just trained. Th
 
 ## Requirements
 
-- **OS and Python.** Python 3.10+. Tested on Windows 11. Linux and macOS are unverified.
-- **GPU.** Tested on the NVIDIA RTX 4050 Laptop GPU (6 GB), RTX 4080 (16 GB), RTX 4090 (24 GB) and AMD Radeon RX 7900 XT (20 GB). The rasterizer supports 32- and 64-lane waves and uses 64-bit integer buffer atomics through Vulkan (default) or Direct3D 12 (Windows).
-- **VRAM.** On Mip-NeRF 360, Balanced used 2.72-2.90 GiB at loop end on the RTX 4080 and 4090 and 2.76-2.95 GiB on the RX 7900 XT. Peak and viewer usage can be higher. [GPU memory measurements](docs/benchmarks.md)
+- **OS and Python.** Python 3.10+. Tested on Windows 11 and macOS (Apple Silicon). Linux is unverified.
+- **GPU.** Tested on the NVIDIA RTX 4050 Laptop GPU (6 GB), RTX 4080 (16 GB), RTX 4090 (24 GB), AMD Radeon RX 7900 XT (20 GB), and Apple M4 Pro (Metal). The rasterizer supports 32- and 64-lane waves through Vulkan (default on Windows/Linux), Direct3D 12 (Windows), or Metal (default on macOS; requires Xcode Command Line Tools + Apple's Metal Toolchain).
+- **VRAM.** On Mip-NeRF 360, Balanced used 2.72-2.90 GiB at loop end on the RTX 4080 and 4090, 2.76-2.95 GiB on the RX 7900 XT, and 2.19 GiB base GPU buffers (2.23 GiB total allocated) on Apple Silicon Metal (using packed 56 B `Gaussian3D` and native `atomic_float` gradients). Peak and viewer usage can be higher. [GPU memory measurements](docs/benchmarks.md)
 
 ## Quickstart
 Perf-gs was designed to be extremely simple to setup and install.
@@ -183,6 +183,22 @@ Run `.\.venv\Scripts\python.exe -m trainer.frontend.app --help` to see every fla
 [Hub walkthrough](docs/usage.md#interactive-hub) - [Datasets](docs/usage.md#datasets) - [First-run help](docs/usage.md#first-run-help)
 
 Select **Quality+** in the hub or add `--preset quality+` to the training command. It starts with Quality’s 3,500 steps, then refines the same splats. [How Quality+ decides when to stop](docs/usage.md#quality-convergence)
+
+### macOS (Apple Silicon)
+
+On Apple Silicon, `--backend metal` is selected automatically and unified memory budgeting queries `MTLDevice.recommendedMaxWorkingSetSize`. Ensure Apple's Metal Toolchain is installed (`xcodebuild -downloadComponent MetalToolchain` if `xcrun -sdk macosx metal --version` fails).
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -e .
+
+# Launch the interactive hub:
+.venv/bin/python -m trainer.frontend.app --hub
+
+# Or download Tanks & Temples and train headlessly:
+.venv/bin/python scripts/data/download_tandt_db.py --set tandt
+.venv/bin/python -m trainer.frontend.app --scene datasets/tandt/truck --no-viewer --save-ply
+```
 
 <a id="rtx-4050-laptop-gpu-on-truck"></a>
 
@@ -258,6 +274,22 @@ Quality+ stopped between 8,652 and 21,996 steps. Compared with Quality, it gaine
 ![RTX 4080 training-loop time, PSNR, SSIM and VGG LPIPS by scene for the three fixed-budget presets](assets/mipnerf360-rtx4080-presets.png)
 
 </details>
+
+### Apple Silicon (Metal)
+
+Measured on an **Apple M4 Pro** (24 GB unified memory, 17.76 GiB Metal working-set budget) on Tanks & Temples (`truck` and `train`, `--backend metal --seed 42 --no-viewer --final-test-psnr`):
+
+| Scene | Preset | Resolution | Steps | Training loop | Throughput | Held-out PSNR ↑ | Final splats | VRAM in use |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `truck` | Ultrafast (`--stbn-source white`) | 489×272 (4×) | 3,000 | **33.8 s** | **88.8 it/s** | 27.41 dB | 0.91M | 2.14 GiB |
+| `truck` | Balanced (default) | 489×272 (4×) | 3,000 | **42.3 s** | **71.0 it/s** | 27.93 dB | 1.01M | 2.23 GiB |
+| `truck` | **Quality** | 489×272 (4×) | 3,500 | **54.0 s** | **64.9 it/s** | 28.28 dB | 0.76M | 4.11 GiB |
+| `truck` | **Quality+** | 489×272 (4×) | 29,780 | **361.9 s** | **82.3 it/s** | **28.78 dB** | 0.76M | 4.13 GiB |
+| `truck` | Balanced | 978×545 (2×) | 3,000 | **89.7 s** | 33.5 it/s | 27.05 dB | 1.78M | 2.34 GiB |
+| `truck` | Balanced | 1957×1091 (1×) | 3,000 | **189.5 s** | 15.8 it/s | 27.10 dB | 1.72M | 2.74 GiB |
+| `train` | Balanced | 489×272 (4×) | 3,000 | **45.5 s** | 66.0 it/s | 21.81 dB | 1.06M | 2.23 GiB |
+
+Metal uses packed 56 B `Gaussian3D` structs (full layout parity with Vulkan/D3D12), wave-compacted visible-only `depth_sort` and `sh_forward`, hardware FP32 `atomic_float` gradients, Metal SIMD prefix-scan backward, cooperative 32-splat bucket preloading in the forward rasterizer, and sync-bracketed per-stage profiling via `--stage-timing-every`.
 
 
 ## Reconstructions

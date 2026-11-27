@@ -62,20 +62,20 @@ void adamStep(
     RWStructuredBuffer<Gaussian3D> gaussians,
     RWStructuredBuffer<AdamState> adam_state,
     StructuredBuffer<uint> num_gaussians_counter,
-    RWStructuredBuffer<int64_t> grad_mean_x,
-    RWStructuredBuffer<int64_t> grad_mean_y,
-    RWStructuredBuffer<int64_t> grad_mean_z,
-    RWStructuredBuffer<int64_t> grad_log_scale_x,
-    RWStructuredBuffer<int64_t> grad_log_scale_y,
-    RWStructuredBuffer<int64_t> grad_log_scale_z,
-    RWStructuredBuffer<int64_t> grad_rot_w,
-    RWStructuredBuffer<int64_t> grad_rot_x,
-    RWStructuredBuffer<int64_t> grad_rot_y,
-    RWStructuredBuffer<int64_t> grad_rot_z,
-    RWStructuredBuffer<int64_t> grad_opacity,
-    RWStructuredBuffer<int64_t> grad_color_r,
-    RWStructuredBuffer<int64_t> grad_color_g,
-    RWStructuredBuffer<int64_t> grad_color_b,
+    GradBuffer grad_mean_x,
+    GradBuffer grad_mean_y,
+    GradBuffer grad_mean_z,
+    GradBuffer grad_log_scale_x,
+    GradBuffer grad_log_scale_y,
+    GradBuffer grad_log_scale_z,
+    GradBuffer grad_rot_w,
+    GradBuffer grad_rot_x,
+    GradBuffer grad_rot_y,
+    GradBuffer grad_rot_z,
+    GradBuffer grad_opacity,
+    GradBuffer grad_color_r,
+    GradBuffer grad_color_g,
+    GradBuffer grad_color_b,
     // Cluster-cull mask; all ones when culling is disabled.
     StructuredBuffer<uint> cluster_visible,
     uniform AdamConfig cfg,
@@ -88,22 +88,22 @@ void adamStep(
     float inv_pixels = 1.0 / max(pixels_per_step, 1.0);
 
     float3 g_mean = float3(
-        fromFixed(grad_mean_x[idx]), fromFixed(grad_mean_y[idx]), fromFixed(grad_mean_z[idx])
+        fromGrad(grad_mean_x[idx]), fromGrad(grad_mean_y[idx]), fromGrad(grad_mean_z[idx])
     ) * inv_pixels;
 
     float3 g_log_scale = float3(
-        fromFixed(grad_log_scale_x[idx]), fromFixed(grad_log_scale_y[idx]), fromFixed(grad_log_scale_z[idx])
+        fromGrad(grad_log_scale_x[idx]), fromGrad(grad_log_scale_y[idx]), fromGrad(grad_log_scale_z[idx])
     ) * inv_pixels;
 
     float4 g_rot = float4(
-        fromFixed(grad_rot_w[idx]), fromFixed(grad_rot_x[idx]),
-        fromFixed(grad_rot_y[idx]), fromFixed(grad_rot_z[idx])
+        fromGrad(grad_rot_w[idx]), fromGrad(grad_rot_x[idx]),
+        fromGrad(grad_rot_y[idx]), fromGrad(grad_rot_z[idx])
     ) * inv_pixels;
 
-    float g_op = fromFixed(grad_opacity[idx]) * inv_pixels;
+    float g_op = fromGrad(grad_opacity[idx]) * inv_pixels;
 
     float3 g_color = float3(
-        fromFixed(grad_color_r[idx]), fromFixed(grad_color_g[idx]), fromFixed(grad_color_b[idx])
+        fromGrad(grad_color_r[idx]), fromGrad(grad_color_g[idx]), fromGrad(grad_color_b[idx])
     ) * inv_pixels;
 
     bool any_bad = any(isnan(g_mean)) || any(isinf(g_mean))
@@ -136,11 +136,24 @@ void adamStep(
     gaussians[idx] = g;
     adam_state[idx] = storeAdamMoments(s, adamRoundingSeed(idx, cfg.step));
 
-    grad_mean_x[idx] = int64_t(0); grad_mean_y[idx] = int64_t(0); grad_mean_z[idx] = int64_t(0);
-    grad_log_scale_x[idx] = int64_t(0); grad_log_scale_y[idx] = int64_t(0); grad_log_scale_z[idx] = int64_t(0);
-    grad_rot_w[idx] = int64_t(0); grad_rot_x[idx] = int64_t(0); grad_rot_y[idx] = int64_t(0); grad_rot_z[idx] = int64_t(0);
-    grad_opacity[idx] = int64_t(0);
-    grad_color_r[idx] = int64_t(0); grad_color_g[idx] = int64_t(0); grad_color_b[idx] = int64_t(0);
+    if (any(g_mean != float3(0.0)))
+    {
+        grad_mean_x[idx] = GradScalar(0); grad_mean_y[idx] = GradScalar(0); grad_mean_z[idx] = GradScalar(0);
+    }
+    if (any(g_log_scale != float3(0.0)))
+    {
+        grad_log_scale_x[idx] = GradScalar(0); grad_log_scale_y[idx] = GradScalar(0); grad_log_scale_z[idx] = GradScalar(0);
+    }
+    if (any(g_rot != float4(0.0)))
+    {
+        grad_rot_w[idx] = GradScalar(0); grad_rot_x[idx] = GradScalar(0); grad_rot_y[idx] = GradScalar(0); grad_rot_z[idx] = GradScalar(0);
+    }
+    if (g_op != 0.0)
+        grad_opacity[idx] = GradScalar(0);
+    if (any(g_color != float3(0.0)))
+    {
+        grad_color_r[idx] = GradScalar(0); grad_color_g[idx] = GradScalar(0); grad_color_b[idx] = GradScalar(0);
+    }
 }
 
 #include "primitives/gaussian/sh_layout.slang"

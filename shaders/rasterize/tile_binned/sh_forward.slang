@@ -13,20 +13,18 @@
 void shForward(
     uint3 dtid: SV_DispatchThreadID,
     StructuredBuffer<Gaussian3D> gaussians,
-    StructuredBuffer<uint> num_gaussians_counter,
+    StructuredBuffer<uint> visible_ids,
+    StructuredBuffer<uint> visible_count,
     StructuredBuffer<CameraData> camera,
     StructuredBuffer<uint> features_rest,
-    // Splats that touch no tile are never blended, so their color is never read.
-    StructuredBuffer<uint> tile_count_per_gaussian,
     RWStructuredBuffer<BlendData> blend_data,
     uniform uint active_sh_degree,
     uniform uint rest_floats,
     uniform uint max_splats)
 {
-    uint gid = dtid.x;
-    if (gid >= max_splats) return;
-    if (gid >= num_gaussians_counter[0]) return;
-    if (tile_count_per_gaussian[gid] == 0u) return;
+    uint idx = dtid.x;
+    if (idx >= min(visible_count[0], max_splats)) return;
+    uint gid = visible_ids[idx];
 
     Gaussian3D g = gaussians[gid];
     float3 cam_center = cameraCenterWorld(camera[0].view_matrix);

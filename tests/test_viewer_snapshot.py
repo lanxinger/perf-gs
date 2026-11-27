@@ -236,3 +236,59 @@ def test_snapshot_carries_nondefault_extinction_hardness() -> None:
 def test_snapshot_restores_lens_response_after_a_viewer_grow():
     _, viewer, _ = _snapshot(live=15, viewer_capacity=10, vignetting=True)
     assert viewer._pipeline.rasterizer.natural_vignetting
+
+
+def test_nongrowing_snapshot_holds_render_lock_and_updates_cached_count_after_submit() -> None:
+    """Non-growing updates must hold ``_render_lock`` and publish ``cached_count`` only
+    after submitting the GPU upload batch, so ``render_frame()`` never reads a new
+    ``cached_count`` against an older GPU ``active_count``."""
+    events: list[str] = []
+
+    class _TrackingLock:
+        def __enter__(self):
+            events.append("lock_enter")
+        def __exit__(self, *_exc):
+            events.append("lock_exit")
+
+    encoder = _Encoder()
+    view_buffers = _buffers(capacity=100)
+    view_buffers.primitive.cached_count = 50
+
+    class _TrackingRuntime(_Runtime):
+        def submit(self, batch):
+            assert view_buffers.primitive.cached_count == 50, (
+                "cached_count must not advance before the GPU upload batch is submitted")
+            events.append("submit")
+            super().submit(batch)
+
+    pipeline = SimpleNamespace(
+        buffers=view_buffers,
+        raster_config=SimpleNamespace(mip_enabled=False),
+        rasterizer=SimpleNamespace(natural_vignetting=False),
+        set_active_sh_degree=lambda _d: None,
+        set_extinction_hardness=lambda _v: None,
+    )
+    viewer = SimpleNamespace(
+        state=Session(),
+        runtime=_TrackingRuntime(encoder),
+        max_splats=100,
+        _has_data=False,
+        _pipeline=pipeline,
+        _render_lock=_TrackingLock(),
+        _explicit_sort_pairs=None,
+        _grow=lambda count, limit: Viewer._grow(viewer, count, limit),
+        _copy_snapshot=lambda train, count: Viewer._copy_snapshot(viewer, train, count),
+        live_splat_count=lambda p: Viewer.live_splat_count(viewer, p),
+        invalidate_scene=lambda: events.append("invalidate"),
+    )
+    train = SimpleNamespace(
+        rasterizer=SimpleNamespace(natural_vignetting=False),
+        buffers=_buffers(capacity=100),
+        max_splats=100,
+        primitives=SimpleNamespace(count=lambda: 30),
+        active_sh_degree=0,
+        extinction_hardness=1.0,
+    )
+    Viewer.update_gaussians(viewer, train)
+    assert view_buffers.primitive.cached_count == 30
+    assert events == ["lock_enter", "submit", "invalidate", "lock_exit"]

@@ -331,8 +331,15 @@ class TrainingPipeline:
             contextual = self._current_render_state()
         self.set_extinction_hardness(contextual.hardness_value)
         self.set_active_sh_degree(contextual.sh_degree)
+        if self.commands._emulate_indirect and self.buffers.primitive.cached_count is None:
+            if self.commands.last_submit_id:
+                self.runtime.wait_for_submit(self.commands.last_submit_id)
+            self.primitives.count()
         group = self.commands.marker_group
         with self.commands.recording("train_step"):
+            pre_adam = self.commands._emulate_indirect
+            if pre_adam:
+                self.optimizer.prepare_step_args()
             with group("forward"):
                 self.record_forward(camera, contextual)
             with group("loss"):
@@ -342,7 +349,7 @@ class TrainingPipeline:
             with group("regularization"):
                 self.regularizer.record()
             with group("adam"):
-                self.optimizer.step(lrs, contextual.sh_degree)
+                self.optimizer.step(lrs, contextual.sh_degree, args_prepared=pre_adam)
 
     def rasterize(self, camera: Camera,
                   contextual: IterationContextualVariables | None = None) -> None:

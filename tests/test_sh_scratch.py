@@ -126,7 +126,7 @@ def test_plane_batches_commit_before_reusing_scratch() -> None:
                       for operation in ("scatter", "commit")]
 
 
-@pytest.fixture(params=[(backend, degree) for backend in ("vulkan", "d3d12")
+@pytest.fixture(params=[(backend, degree) for backend in ("vulkan", "d3d12", "metal")
                         for degree in (1, 2, 3)], scope="module")
 def sh_pipeline(request):
     backend, degree = request.param
@@ -179,7 +179,8 @@ def test_batched_planes_preserve_all_bits_and_dead_tails(sh_pipeline, kind, live
         arena.reorder_planes(b.sh.adam_rest, kernel, kind, planes, b.scan.total, **permutation)
     pipeline.runtime.wait_for_idle()
 
-    assert b.densification.scratch_arena.capacity_bytes == capacity * 112
+    adam_stride = b.adam.state.storage.size // capacity
+    assert b.densification.scratch_arena.capacity_bytes == capacity * adam_stride
     np.testing.assert_array_equal(b.sh.adam_rest.to_numpy().view(np.uint32), expected.ravel())
 
 
@@ -211,8 +212,8 @@ def test_production_reorders_keep_every_coefficient_and_moment(sh_pipeline, kind
     count = int(b.primitive.active_count.to_numpy()[0])
     expected_count = n if kind == "morton" else int(np.count_nonzero(opacity >= 0.005))
     assert count == expected_count
-    gaussians = b.primitive.values.to_numpy().view(np.float32).reshape(capacity, GAUSSIAN_FLOAT_COUNT)
-    source_slots = gaussians[:count, 11].astype(np.intp)
+    records = np.frombuffer(b.primitive.values.to_numpy().tobytes(), dtype=b.primitive.layout.dtype)
+    source_slots = records["sh0"][:count, 0].astype(np.intp)
     assert np.unique(source_slots).size == count
     if kind != "morton":
         np.testing.assert_array_equal(source_slots, np.flatnonzero(opacity >= 0.005))

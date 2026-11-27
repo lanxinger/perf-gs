@@ -27,7 +27,7 @@ from trainer.data.dataset import simple_camera
 from trainer.backend.compute.device import create_device
 
 
-BACKENDS = ["vulkan", "d3d12"]
+BACKENDS = ["vulkan", "d3d12", "metal"]
 
 
 def _setup(backend: str, max_splats: int, cluster_cull: bool) -> TestPipeline:

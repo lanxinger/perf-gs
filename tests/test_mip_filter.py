@@ -20,7 +20,7 @@ from trainer.backend.memory.layout import StructLayout
 from trainer.backend.render.mip_filter import MipFilter
 from trainer.data.dataset import simple_camera
 
-BACKENDS = ["vulkan", "d3d12"]
+BACKENDS = ["vulkan", "d3d12", "metal"]
 
 
 def _setup(backend: str, max_splats: int = 64) -> TestPipeline:

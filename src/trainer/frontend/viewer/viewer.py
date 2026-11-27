@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import math
 import os
+import queue
+import sys
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -456,6 +458,8 @@ class Viewer:
         self.gpu_lock = gpu_lock if gpu_lock is not None else contextlib.nullcontext()
         self.runtime = GpuRuntime(device, self.gpu_lock)
         self._thread: threading.Thread | None = None
+        self._running = False
+        self._ui_queue: queue.Queue = queue.Queue()
         self._stop_event = threading.Event()
 
         self._start_event = threading.Event()
@@ -537,11 +541,9 @@ class Viewer:
         count = self.live_splat_count(train_pipeline)
         # Densify keeps the count on the GPU, so this snapshot read is the panel's live source.
         self.state.publish_training(gaussians=count)
-        if count <= self.max_splats:
-            self._copy_snapshot(train_pipeline, count)
-            return
-        with self._render_lock:      # no frame may draw the new, still-empty buffers
-            self._grow(count, limit=train_pipeline.max_splats)
+        with self._render_lock:      # serialize GPU upload + cached_count with render_frame()
+            if count > self.max_splats:
+                self._grow(count, limit=train_pipeline.max_splats)
             self._copy_snapshot(train_pipeline, count)
 
     def _copy_snapshot(self, train_pipeline: TrainingPipeline, count: int) -> None:
@@ -558,6 +560,7 @@ class Viewer:
                          dst.primitive.filter_3d.storage, count, src.max_splats)
         encoder.upload_buffer_data(dst.primitive.active_count.storage, 0, np.array([count], dtype=np.uint32))
         self.runtime.submit(batch)
+        dst.primitive.cached_count = int(count)
         self._pipeline.rasterizer.natural_vignetting = train_pipeline.rasterizer.natural_vignetting
         self._pipeline.set_active_sh_degree(train_pipeline.active_sh_degree)
         self._pipeline.set_extinction_hardness(train_pipeline.extinction_hardness)
@@ -686,19 +689,61 @@ class Viewer:
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
+    def run_blocking(self):
+        """Run the viewer event/render loop on the current thread (required on macOS main thread)."""
+        self._stop_event.clear()
+        self._thread = threading.current_thread()
+        self._run()
+
+    def is_alive(self) -> bool:
+        if self._running:
+            return True
+        return self._thread is not None and self._thread is not threading.current_thread() and self._thread.is_alive()
+
+    def call_on_ui_thread(self, fn: Callable):
+        """Run ``fn`` on the viewer thread (for Cocoa file dialogs on macOS), or inline if already there."""
+        if sys.platform != "darwin" or not self._running or threading.current_thread() is self._thread:
+            return fn()
+        done = threading.Event()
+        result: list = []
+        error: list = []
+        self._ui_queue.put((fn, done, result, error))
+        while not done.wait(0.05):
+            if not self._running or self._stop_event.is_set():
+                return None
+        if error:
+            raise error[0]
+        return result[0] if result else None
+
+    def _drain_ui_queue(self) -> None:
+        while True:
+            try:
+                fn, done, result, error = self._ui_queue.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                result.append(fn())
+            except Exception as exc:  # noqa: BLE001
+                error.append(exc)
+            finally:
+                done.set()
+
     def stop(self):
         self._stop_event.set()
-        if self._thread:
+        if self._thread and self._thread is not threading.current_thread():
             self._thread.join(timeout=3.0)
 
     def _run(self):
+        self._running = True
         try:
             self._run_inner()
         except Exception as e:
             self._report_error("crashed", e)
         finally:
+            self._running = False
             self._stop_event.set()
             self._pause_event.clear()
+            self._drain_ui_queue()
 
     def _report_error(self, context: str, error: Exception) -> None:
         signature = (context, type(error), str(error))
@@ -880,7 +925,6 @@ class Viewer:
                 if surface_tex is None:      # can happen transiently on resize
                     return
                 batch = self.runtime.command_batch("viewer_frame")
-                enc = batch.encoder
                 if self._has_data:
                     now = time.perf_counter()
                     if self._scene_due(now):
@@ -889,8 +933,11 @@ class Viewer:
                             self._pipeline.rasterize(camera)
                         self._scene_dirty.clear()
                         self._last_scene_s = now
+                    # Fetch batch.encoder AFTER rasterize: Metal indirect emulation may reopen it.
+                    enc = batch.encoder
                     enc.blit(surface_tex, self._pipeline.buffers.raster.output_image)
                 else:
+                    enc = batch.encoder
                     enc.clear_texture_float(surface_tex, clear_value=BACKDROP)
                 ui.begin(w, h, window)
                 ui.end(surface_tex, enc)
@@ -921,6 +968,7 @@ class Viewer:
 
         while not window.should_close() and not self._stop_event.is_set():
             window.process_events()
+            self._drain_ui_queue()
             if self._suspend.is_set():  # hub setup owns the GPU queue right now
                 time.sleep(0.02)
                 continue

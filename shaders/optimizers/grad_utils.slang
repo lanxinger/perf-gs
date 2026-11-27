@@ -7,12 +7,12 @@
 [numthreads(256, 1, 1)]
 void clearGradBuffer(
     uint3 dtid: SV_DispatchThreadID,
-    RWStructuredBuffer<int64_t> grad_buffer,
+    GradBuffer grad_buffer,
     uniform uint max_splats)
 {
     uint i = dtid.x;
     if (i >= max_splats) return;
-    grad_buffer[i] = int64_t(0);
+    grad_buffer[i] = GradScalar(0);
 }
 
 // `count` is the total uint length; a zero uint unpacks to two 0.0 fp16 halves.

@@ -20,7 +20,7 @@ from trainer.data.dataset import simple_camera
 from trainer.backend.compute.device import create_device
 from trainer.common.sh import pack_features_rest, unpack_features_rest
 
-BACKENDS = ["vulkan", "d3d12"]
+BACKENDS = ["vulkan", "d3d12", "metal"]
 
 
 def _read_features_rest(p: TestPipeline, n: int) -> np.ndarray:
@@ -346,8 +346,11 @@ def test_sh_active_band_adam_matches_full_width(backend: str) -> None:
 
     rest_per_band = 3
     n_active = ((active_deg + 1) ** 2 - 1) * rest_per_band  # 9 floats
-    # Active head must match the full-width reference bit-for-bit.
-    np.testing.assert_array_equal(capped[:n_active], full[:n_active])
+    # Active head must match the full-width reference (up to 1-2 fp16 ULPs on Metal atomic_float).
+    if backend == "metal":
+        np.testing.assert_allclose(capped[:n_active], full[:n_active], rtol=1e-3, atol=1e-4)
+    else:
+        np.testing.assert_array_equal(capped[:n_active], full[:n_active])
     # Inactive higher bands must be untouched (exactly zero) in BOTH runs.
     assert np.all(capped[n_active:] == 0.0), "capped run moved an inactive band"
     assert np.all(full[n_active:] == 0.0), "full run moved an inactive band"
@@ -396,9 +399,9 @@ def test_sh_features_rest_survives_morton_sort(backend: str) -> None:
     p.morton.reorder(world_min, world_max)
     p.device.wait_for_idle()
 
-    floats = np.frombuffer(p.buffers.primitive.values.to_numpy().tobytes(),
-                           dtype=np.float32).reshape(-1, 14)
-    sorted_sh0_r = floats[:n, 11]   # original slot index carried in sh0.r
+    records = np.frombuffer(p.buffers.primitive.values.to_numpy().tobytes(),
+                            dtype=p.buffers.primitive.layout.dtype)
+    sorted_sh0_r = records["sh0"][:n, 0]   # original slot index carried in sh0.r
 
     rest_out = _read_features_rest(p, n)[:, 0]
     arest_out = _read_adam_m(p, n)[:, 0]
@@ -425,10 +428,12 @@ def _force_clone_eta(p: TestPipeline, idx: int = 0) -> None:
     w(b.eta.components["n_low"], 0)
     for key, val in (("max_x", 4.0), ("max_y", 2.0), ("max_z", 0.05)):
         w(b.eta.components[key], int(val * 65536.0))
+    from trainer.backend.memory.buffers import encode_grad_array
     w(b.densification.visibility_count, 1)
-    a = np.zeros(N, dtype=np.int64)
-    a[idx] = int(1.0 * 65536.0)
-    b.densification.grad_mean_2d_mag.copy_from_numpy(a)
+    a = np.zeros(N, dtype=np.float64)
+    a[idx] = 1.0
+    b.densification.grad_mean_2d_mag.copy_from_numpy(
+        encode_grad_array(b.densification.grad_mean_2d_mag, a))
 
 
 @pytest.mark.parametrize("backend", BACKENDS)

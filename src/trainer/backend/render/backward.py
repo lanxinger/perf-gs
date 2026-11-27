@@ -179,11 +179,15 @@ class RasterBackward:
                 extinction_hardness=hardness)
         self._pixel_phase += 1
 
+    def _active_threads(self) -> int:
+        live = self._primitive.cached_count
+        return max(1, min(live, self._capacity)) if live is not None else self._capacity
+
     def _record_projection(self) -> None:
         grads = self._gradients.params
         config = self._rasterizer.config
         self._commands.dispatch(self._k.projection_backward, "projection_backward",
-            thread_count=[self._capacity, 1, 1],
+            thread_count=[self._active_threads(), 1, 1],
             gaussians=self._primitive.values.storage,
             num_gaussians_counter=self._primitive.active_count.storage,
             camera=self._rasterizer.camera_buffer,
@@ -226,7 +230,7 @@ class RasterBackward:
     def _record_sh(self, sh_degree: int) -> None:
         grads = self._gradients.params
         self._commands.dispatch(self._k.sh_backward, "sh_backward",
-            thread_count=[self._capacity, 1, 1],
+            thread_count=[self._active_threads(), 1, 1],
             gaussians=self._primitive.values.storage,
             num_gaussians_counter=self._primitive.active_count.storage,
             camera=self._rasterizer.camera_buffer,

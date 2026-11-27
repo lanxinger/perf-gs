@@ -13,10 +13,10 @@ void addRegularization(
     uint3 dtid: SV_DispatchThreadID,
     StructuredBuffer<Gaussian3D> gaussians,
     StructuredBuffer<uint> num_gaussians_counter,
-    RWStructuredBuffer<int64_t> grad_opacity,
-    RWStructuredBuffer<int64_t> grad_log_scale_x,
-    RWStructuredBuffer<int64_t> grad_log_scale_y,
-    RWStructuredBuffer<int64_t> grad_log_scale_z,
+    GradBuffer grad_opacity,
+    GradBuffer grad_log_scale_x,
+    GradBuffer grad_log_scale_y,
+    GradBuffer grad_log_scale_z,
     StructuredBuffer<uint> cluster_visible,
     uniform float w_opacity,
     uniform float w_scale)
@@ -34,15 +34,15 @@ void addRegularization(
     {
         float sig = sigmoid(g.opacity);
         float d_opa = w_opacity * sig * (1.0 - sig) * inv_n;
-        InterlockedAdd(grad_opacity[i], toFixed(d_opa));
+        grad_opacity[i] += toGrad(d_opa);
     }
 
     if (w_scale > 0.0)
     {
         float3 scale = exp(g.log_scale);
         float3 d_scale = w_scale * scale * inv_n;
-        InterlockedAdd(grad_log_scale_x[i], toFixed(d_scale.x));
-        InterlockedAdd(grad_log_scale_y[i], toFixed(d_scale.y));
-        InterlockedAdd(grad_log_scale_z[i], toFixed(d_scale.z));
+        grad_log_scale_x[i] += toGrad(d_scale.x);
+        grad_log_scale_y[i] += toGrad(d_scale.y);
+        grad_log_scale_z[i] += toGrad(d_scale.z);
     }
 }

@@ -16,7 +16,7 @@ from structure_tensor_reference import EPS, principal_eigenvalue, structure_tens
 from trainer.backend.compute.device import create_device
 from trainer.backend.densify.structure_tensor import StructureTensor
 
-BACKENDS = ["vulkan", "d3d12"]
+BACKENDS = ["vulkan", "d3d12", "metal"]
 
 
 def _grating(h: int, w: int, omega: float, axis: str) -> np.ndarray:

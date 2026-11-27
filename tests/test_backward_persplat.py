@@ -21,7 +21,7 @@ from trainer.backend.compute.device import create_device, create_slang_session
 from trainer.config.config import LossConfig
 from trainer.data.dataset import simple_camera
 
-BACKENDS = ["vulkan", "d3d12"]
+BACKENDS = ["vulkan", "d3d12", "metal"]
 
 GRAD_NAMES = [
     "mean_x", "mean_y", "mean_z",
@@ -140,9 +140,10 @@ def test_projection_backward_resets_the_seeds(backend: str) -> None:
                            target=(0.0, 0.0, 1.0), up=(0.0, 1.0, 0.0),
                            fovy_degrees=60.0)
 
+    from trainer.backend.memory.buffers import decode_grad_buffer
     first = _grads_with(pipeline, _deep_scene(100, seed=3), camera)
     for name, buffer in pipeline.buffers.gradients.seeds.items():
-        seeds = np.frombuffer(buffer.to_numpy().tobytes(), dtype=np.int64)
+        seeds = decode_grad_buffer(buffer)
         assert not seeds.any(), f"seed {name} not reset by projection_backward"
 
     pipeline.forward_and_loss(camera)
@@ -151,4 +152,8 @@ def test_projection_backward_resets_the_seeds(backend: str) -> None:
     second = pipeline.read_gradients()
     assert np.any(first["mean_x"] != 0.0) and np.any(first["log_scale_x"] != 0.0)
     for name in GRAD_NAMES[:10]:   # geometry grads: stored, not accumulated
-        np.testing.assert_array_equal(second[name], first[name], err_msg=name)
+        if backend == "metal":
+            # Hardware atomic_float accumulation is non-associative (~1-2 fp32 ULP across tiles).
+            np.testing.assert_allclose(second[name], first[name], rtol=1e-5, atol=1e-5, err_msg=name)
+        else:
+            np.testing.assert_array_equal(second[name], first[name], err_msg=name)

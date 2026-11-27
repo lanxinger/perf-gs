@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
+import threading
 import time
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -178,6 +180,24 @@ class TrainingApplication:
 
     def start_training(self) -> None:
         self.prepare_training_context()
+        if sys.platform == "darwin" and self.viewer is not None and self.viewer.enabled:
+            worker_error: list[BaseException] = []
+            def _train_worker() -> None:
+                try:
+                    self._run_training_and_post(hold_viewer=False, publish_completion=True)
+                except BaseException as exc:
+                    worker_error.append(exc)
+                    if self.viewer is not None and self.viewer._viewer is not None:
+                        self.viewer._viewer.stop()
+            worker = threading.Thread(target=_train_worker, daemon=True)
+            worker.start()
+            try:
+                self.viewer.run_blocking()
+            finally:
+                worker.join(timeout=5.0)
+            if worker_error:
+                raise worker_error[0]
+            return
         self._run_training_and_post()
 
 
@@ -219,10 +239,13 @@ class TrainingApplication:
         self.profiler = None            # already closed by _run_training_and_post
 
 
-    def _run_training_and_post(self, *, hold_viewer: bool = True) -> str | None:
+    def _run_training_and_post(self, *, hold_viewer: bool = True,
+                               publish_completion: bool | None = None) -> str | None:
         """Train, then write the run's post-training artifacts.
         ``hold_viewer`` blocks on the viewer window afterwards (CLI); the hub passes False
-        because blocking there would freeze its panel."""
+        because blocking there would freeze its panel. ``publish_completion`` defaults to
+        ``hold_viewer`` so the hub can publish completion itself while macOS CLI viewer
+        runs can publish completion from the worker thread without blocking it."""
         
         # TRAINING LOOP IS HERE
         try:
@@ -271,12 +294,15 @@ class TrainingApplication:
                 self._training_runtime.profiler.close()
             self._training_runtime.artifacts.close_all()
 
-        if hold_viewer:
+        if publish_completion is None:
+            publish_completion = hold_viewer
+        if publish_completion:
             stats = viewer.state.snapshot().stats
             viewer.state.training_completed(ResultInfo(
                 iterations=result.iterations, target_iterations=self.args.iters,
                 wall_s=result.wall_time_seconds, splats=stats.gaussians,
                 run_dir=str(self.paths.root), stop_reason=result.stop_reason))
+        if hold_viewer:
             # Metrics must finish (or be stopped) before the CLI waits for the window to close.
             viewer.hold_after_training(pipeline)
         # The hub publishes the completed transition and result record once this returns.
@@ -477,7 +503,8 @@ class TrainingApplication:
 
         if self.error_log is not None:
             self.error_log.attach(self.viewer.state)
-        self.viewer.start()
+        if not (sys.platform == "darwin" and self.viewer.enabled):
+            self.viewer.start()
 
     def _start_profiler(self):
         if self.profiling_enabled:

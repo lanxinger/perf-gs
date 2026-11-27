@@ -15,7 +15,7 @@ from trainer.frontend.cli import build_parser
 from _colmap_testkit import write_colmap_scene
 
 
-@pytest.fixture(params=["vulkan", "d3d12"])
+@pytest.fixture(params=["vulkan", "d3d12", "metal"])
 def device(request):
     try:
         device = create_device(backend=request.param)

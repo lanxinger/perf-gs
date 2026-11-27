@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
 #include "../common/types.slang"
+#include "../common/execution.slang"
 #include "../primitives/gaussian/project.slang"
 
 // One group of THREADS_PER_SPLAT lanes per gaussian, each striding over cameras for a min
@@ -102,7 +103,7 @@ void computeMip3DFilter(
     // The group usually fits in one wave; narrower waves merge their results after one barrier.
     float group_min = WaveActiveMin(min_z);
     bool group_any = WaveActiveAnyTrue(any_valid);
-    uint wave_size = WaveGetLaneCount();
+    uint wave_size = trainerWaveLaneCount();
     if (wave_size < THREADS_PER_SPLAT)
     {
         s_min_z[lane] = group_min;
