@@ -130,6 +130,7 @@ def test_stochastic_rounding_keeps_the_second_moment_moving(backend) -> None:
 
 
 def test_bf16_training_run_with_sh_and_densification(backend, tmp_path, monkeypatch) -> None:
+    _device(backend).close()
     monkeypatch.chdir(tmp_path)
     scene = write_colmap_scene(tmp_path / "scene", views=[
         (f"{i}.png", 16, 16, 20.0) for i in range(4)])
@@ -161,6 +162,7 @@ def test_bf16_training_run_with_sh_and_densification(backend, tmp_path, monkeypa
 def test_a_hub_run_turns_bf16_on_after_the_device_exists(backend, tmp_path, monkeypatch) -> None:
     """The hub creates its device before the panel is read; a run switched to bf16 there
     must still get the bf16 layout (from its own Slang session) and train."""
+    _device(backend).close()
     monkeypatch.chdir(tmp_path)
     scene = write_colmap_scene(tmp_path / "scene", views=[
         (f"{i}.png", 16, 16, 20.0) for i in range(4)])

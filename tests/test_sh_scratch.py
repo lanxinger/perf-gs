@@ -65,7 +65,7 @@ def test_allocator_shrinks_scratch_not_persistent_moments(monkeypatch, degree) -
         def uint_buffer(self, label, *shape):
             return self.typed_buffer(label, "uint", *shape)
 
-        def i64_buffer(self, label, *shape):
+        def fixed_buffer(self, label, *shape):
             return self.typed_buffer(label, "int64_t", *shape)
 
         def indirect_buffer(self, label, records=1):

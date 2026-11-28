@@ -202,16 +202,19 @@ def test_viewer_reports_different_errors_but_does_not_flood_each_frame(capfd):
 def test_viewer_thread_failure_is_logged_and_wakes_paused_training(capfd):
     viewer = object.__new__(Viewer)
     viewer.state = Session(MODE_HUB)
-    viewer._stop_event = threading.Event()
-    viewer._pause_event = threading.Event()
+    for name in ("_stop_event", "_closed_by_user", "_stop_training",
+                 "_pause_event", "_started", "_exited"):
+        setattr(viewer, name, threading.Event())
     viewer._pause_event.set()
 
     def fail():
         raise RuntimeError("VK_ERROR_DEVICE_LOST")
 
     viewer._run_inner = fail
-    viewer._run()
+    viewer.run()
     assert viewer._stop_event.is_set()
+    assert viewer.has_exited()
+    assert not viewer.stop_requested()
     assert not viewer._pause_event.is_set()
     assert viewer.state.snapshot().show_log
     assert any("crashed" in line for line in viewer.state.snapshot().log)

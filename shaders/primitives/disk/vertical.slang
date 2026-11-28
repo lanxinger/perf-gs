@@ -74,7 +74,7 @@ void diskBackward(
 void diskAdam(
     uint3 dtid: SV_DispatchThreadID,
     RWStructuredBuffer<Disk2D> primitives,
-    RWStructuredBuffer<int64_t> gradients,
+    RWStructuredBuffer<fixed_t> gradients,
     RWStructuredBuffer<float> moment1,
     RWStructuredBuffer<float> moment2,
     StructuredBuffer<uint> primitive_count,

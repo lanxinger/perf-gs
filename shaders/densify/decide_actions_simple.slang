@@ -20,7 +20,7 @@ void decideActionsSimple(
     StructuredBuffer<uint> num_gaussians_counter,
     ReadGradBuffer grad_mean_2d_mag_accum,
     StructuredBuffer<uint> visibility_count_accum,
-    StructuredBuffer<int64_t> blend_weight_accum,
+    StructuredBuffer<fixed_t> blend_weight_accum,
     RWStructuredBuffer<uint> action,
     uniform float grad_thresh,
     uniform float scale_thresh,

@@ -97,7 +97,7 @@ struct ChannelLearningRates<let N : int>
 // fixed-point, atomically summed by the backward pass.
 struct AdamPlanes<let N : int>
 {
-    RWStructuredBuffer<int64_t> gradients;
+    RWStructuredBuffer<fixed_t> gradients;
     RWStructuredBuffer<float>   moment1;
     RWStructuredBuffer<float>   moment2;
     uint channel_stride;
@@ -150,7 +150,7 @@ struct AdamPass
 
             planes.moment1[addr] = m;
             planes.moment2[addr] = v;
-            planes.gradients[addr] = int64_t(0);
+            planes.gradients[addr] = fixed_t(0);
         }
 
         storage.storeValues(index, values);

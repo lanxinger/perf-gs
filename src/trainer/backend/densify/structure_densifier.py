@@ -9,9 +9,9 @@ import numpy as np
 import slangpy as spy
 
 from trainer.backend.compute.algorithms import PrefixScan
+from trainer.backend.compute.fixed_point import ETA_FIXED_SCALE, fixed_point_format
 from trainer.backend.compute.gpu import CommandRecorder
 from trainer.backend.compute.kernels import KernelLibrary
-from trainer.config.config import StructureConfig
 from trainer.backend.densify.opacity import OpacityReset
 from trainer.backend.memory.arena import ArenaCommitter
 from trainer.backend.memory.buffers import (
@@ -24,13 +24,13 @@ from trainer.backend.memory.buffers import (
     SphericalHarmonicsResources,
     StructureSplitResources,
 )
+from trainer.config.config import StructureConfig
 
 _DISPATCH = "densify/densify_dispatch.slang"
 _COMPACT = "densify/scatter_compact.slang"
 _SCORE = "densify/score_structure_aware.slang"
 _SPLIT = "densify/split_anisotropic.slang"
 _RANK = "densify/rank_families.slang"
-FIXED_POINT_SCALE = 65536.0
 
 
 class StructureDensifier:
@@ -61,6 +61,7 @@ class StructureDensifier:
         self._commands = commands
         self._kernel_library = kernels
         self._kernels = kernels.load(self.KERNELS)
+        self._fixed_point = fixed_point_format(kernels.session)
         self._primitive = primitive
         self._adam_resources = adam
         self._densification_resources = resources
@@ -288,10 +289,11 @@ class StructureDensifier:
         n_total = u32(self.eta_resources.n_total).astype(np.float64)
         n_high = u32(eta["n_high"]).astype(np.float64)
         eta_max = np.maximum(u32(eta["max_x"]), np.maximum(u32(eta["max_y"]), u32(eta["max_z"])))
-        eta_max = eta_max.astype(np.float64) / FIXED_POINT_SCALE
+        eta_max = eta_max.astype(np.float64) / ETA_FIXED_SCALE
         visible = u32(self._densification_resources.visibility_count).astype(np.float64)
         from trainer.backend.memory.buffers import decode_grad_buffer
-        grad = decode_grad_buffer(self._densification_resources.grad_mean_2d_mag, pre_count)
+        grad = decode_grad_buffer(
+            self._densification_resources.grad_mean_2d_mag, pre_count, fixed_point=self._fixed_point)
         seen = n_total > 0
         if not seen.any():
             return

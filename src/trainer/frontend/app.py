@@ -7,9 +7,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -151,10 +151,15 @@ class TrainingApplication:
     def prepare_training_context(self) -> None:
         self.profiling_enabled = apply_profile_session_overrides(self.args)
         self._create_device()
-        self._prepare_scene(self.args.scene)
+        self.prepare_run(self.args.scene)
+
+    def prepare_run(self, scene_dir, prepared=None) -> None:
+        """Prepare scene, pipeline, textures, profiler and services for one run."""
+        self._prepare_scene(scene_dir, prepared)
         self._create_pipeline_for_scene(self._sceneContext)
         self._prepare_textures()
-        self._start_viewer(self.scene_context)
+        if self.viewer is None:
+            self._create_viewer(self._sceneContext)
         self._start_profiler()
         self._create_training_services()
 
@@ -180,25 +185,47 @@ class TrainingApplication:
 
     def start_training(self) -> None:
         self.prepare_training_context()
-        if sys.platform == "darwin" and self.viewer is not None and self.viewer.enabled:
-            worker_error: list[BaseException] = []
-            def _train_worker() -> None:
-                try:
-                    self._run_training_and_post(hold_viewer=False, publish_completion=True)
-                except BaseException as exc:
-                    worker_error.append(exc)
-                    if self.viewer is not None and self.viewer._viewer is not None:
-                        self.viewer._viewer.stop()
-            worker = threading.Thread(target=_train_worker, daemon=True)
-            worker.start()
-            try:
-                self.viewer.run_blocking()
-            finally:
-                worker.join(timeout=5.0)
-            if worker_error:
-                raise worker_error[0]
+        self.run_with_viewer(self.run_training_and_post)
+
+    def run_with_viewer(self, work: Callable[[], Any]) -> None:
+        """Run ``work`` inline when headless, or on a worker thread while the viewer owns the main thread."""
+        viewer = self._viewer
+        if not viewer.enabled:
+            work()
             return
-        self._run_training_and_post()
+        failure: list[BaseException] = []
+
+        def run_worker() -> None:
+            try:
+                work()
+            except BaseException as error:
+                failure.append(error)
+            finally:
+                viewer.stop()
+
+        viewer.mark_starting()
+        worker = threading.Thread(target=run_worker, name="perf-gs-worker", daemon=True)
+        worker.start()
+        interrupted = False
+        try:
+            viewer.run()
+        except KeyboardInterrupt:
+            interrupted = True
+            viewer.stop()
+            raise
+        finally:
+            if interrupted:
+                worker.join(timeout=2.0)
+            else:
+                try:
+                    while worker.is_alive():
+                        worker.join(timeout=0.1)
+                except KeyboardInterrupt:
+                    viewer.stop()
+                    worker.join(timeout=2.0)
+                    raise
+        if failure:
+            raise failure[0]
 
 
     def _begin_repeat_run(self) -> None:
@@ -239,13 +266,10 @@ class TrainingApplication:
         self.profiler = None            # already closed by _run_training_and_post
 
 
-    def _run_training_and_post(self, *, hold_viewer: bool = True,
-                               publish_completion: bool | None = None) -> str | None:
-        """Train, then write the run's post-training artifacts.
+    def run_training_and_post(self, *, hold_viewer: bool = True) -> ResultInfo | None:
+        """Train, write post-training artifacts, and publish the completed result.
         ``hold_viewer`` blocks on the viewer window afterwards (CLI); the hub passes False
-        because blocking there would freeze its panel. ``publish_completion`` defaults to
-        ``hold_viewer`` so the hub can publish completion itself while macOS CLI viewer
-        runs can publish completion from the worker thread without blocking it."""
+        because blocking there would freeze its panel."""
         
         # TRAINING LOOP IS HERE
         try:
@@ -294,19 +318,16 @@ class TrainingApplication:
                 self._training_runtime.profiler.close()
             self._training_runtime.artifacts.close_all()
 
-        if publish_completion is None:
-            publish_completion = hold_viewer
-        if publish_completion:
-            stats = viewer.state.snapshot().stats
-            viewer.state.training_completed(ResultInfo(
-                iterations=result.iterations, target_iterations=self.args.iters,
-                wall_s=result.wall_time_seconds, splats=stats.gaussians,
-                run_dir=str(self.paths.root), stop_reason=result.stop_reason))
+        stats = viewer.state.snapshot().stats
+        summary = ResultInfo(
+            iterations=result.iterations, target_iterations=self.args.iters,
+            wall_s=result.wall_time_seconds, splats=stats.gaussians,
+            run_dir=str(self.paths.root), stop_reason=result.stop_reason)
+        viewer.state.training_completed(summary)
         if hold_viewer:
             # Metrics must finish (or be stopped) before the CLI waits for the window to close.
             viewer.hold_after_training(pipeline)
-        # The hub publishes the completed transition and result record once this returns.
-        return result.stop_reason
+        return summary
 
     def _report_memory(self) -> dict:
         """Print and return the run's sort-pair demand, owned GPU bytes and VRAM use."""
@@ -486,7 +507,7 @@ class TrainingApplication:
               f"in {time.time() - started:.1f}s", flush=True)
         return fields
 
-    def _start_viewer(self, scene: SceneContext) -> None:
+    def _create_viewer(self, scene: SceneContext) -> None:
         if not self.args.no_viewer:
             # Dataset cameras let the viewer's picker and C/V keys snap to the exact train/eval poses.
             self.viewer = ViewerSession.create(
@@ -503,8 +524,6 @@ class TrainingApplication:
 
         if self.error_log is not None:
             self.error_log.attach(self.viewer.state)
-        if not (sys.platform == "darwin" and self.viewer.enabled):
-            self.viewer.start()
 
     def _start_profiler(self):
         if self.profiling_enabled:
@@ -1190,7 +1209,7 @@ class TrainingLoop:
 
 
 def main() -> None:
-    app = TrainingApplication.from_cli()
+    app: TrainingApplication = TrainingApplication.from_cli()
     with ErrorLog(app.paths.root / "errors.log") as errors:
         app.error_log = errors
         try:

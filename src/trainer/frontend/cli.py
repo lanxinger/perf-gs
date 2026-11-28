@@ -273,6 +273,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default="metal" if sys.platform == "darwin" else "vulkan",
         choices=["vulkan", "d3d12", "metal"],
+        help="GPU API (default: metal on macOS, vulkan elsewhere)",
     )
     parser.add_argument("--seed", type=int, default=0)
     _shared(parser, "mip_splatting")

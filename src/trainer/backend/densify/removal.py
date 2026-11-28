@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from trainer.backend.compute.fixed_point import fixed_point_format
+
 
 def accumulate_removal_cost(pipeline, step: int, hardness: float) -> None:
     raster = pipeline.buffers.raster
@@ -22,7 +24,8 @@ def accumulate_removal_cost(pipeline, step: int, hardness: float) -> None:
 def prune_by_removal_cost(pipeline, fraction: float) -> dict[str, int]:
     count = pipeline.primitives.count()
     target = min(count, max(1, int(fraction * count)))
-    scores = pipeline.buffers.densification.blend_weight.storage.to_numpy().view(np.int64).reshape(-1)[:count]
+    dtype = fixed_point_format(getattr(pipeline, "slang_session", getattr(pipeline, "device", None))).dtype
+    scores = pipeline.buffers.densification.blend_weight.storage.to_numpy().view(dtype).reshape(-1)[:count]
     # Zero denotes no measurement. A small or partially sampled scene can therefore
     # finish above its requested budget.
     observed = np.flatnonzero(scores > 0)

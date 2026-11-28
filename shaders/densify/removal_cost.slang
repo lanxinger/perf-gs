@@ -2,6 +2,39 @@
 
 #include "primitives/gaussian/blend.slang"
 #include "rasterize/tile_binned/blend_forward.slang"
+#include "common/fixed_point.slang"
+
+#ifdef FIXED_POINT_INT32
+typedef RWStructuredBuffer<fixed_t> RemovalScoreBuffer;
+static const int REMOVAL_COST_MAX = 2147483647;
+// Largest float32 strictly below 2^31 so float->int conversion never overflows.
+static const float REMOVAL_COST_MAX_FLOAT = 2147483520.0;
+
+// Saturate at INT32_MAX: pruning only ranks the lowest-scoring splats, so huge scores must never wrap.
+void addRemovalScore(RemovalScoreBuffer scores, uint id, float scaled_energy)
+{
+    int add = (scaled_energy >= REMOVAL_COST_MAX_FLOAT)
+        ? REMOVAL_COST_MAX
+        : (scaled_energy > 1.0 ? int(scaled_energy) : 1);
+    int cur = scores[id];
+    while (cur < REMOVAL_COST_MAX)
+    {
+        int next = (cur > REMOVAL_COST_MAX - add) ? REMOVAL_COST_MAX : cur + add;
+        int prev;
+        InterlockedCompareExchange(scores[id], cur, next, prev);
+        if (prev == cur) return;
+        cur = prev;
+    }
+}
+#else
+typedef AtomicI64Buffer RemovalScoreBuffer;
+void addRemovalScore(RemovalScoreBuffer scores, uint id, float scaled_energy)
+{
+    int64_t energy = int64_t(scaled_energy);
+    // One fixed-point unit distinguishes measured zero contrast from never sampled.
+    atomicAddI64(scores, id, max(energy, int64_t(1)));
+}
+#endif
 
 // Replay one pixel per 4x4 block up to the actual forward pass's early stop.
 [shader("compute")]
@@ -9,7 +42,7 @@
 void accumulateRemovalCost(uint3 tid : SV_DispatchThreadID,
     StructuredBuffer<CameraData> camera, StructuredBuffer<BlendData> blend_data,
     StructuredBuffer<uint> tile_start, StructuredBuffer<uint> sorted_ids,
-    RWTexture2D<uint> processed, RWTexture2D<float4> image, AtomicI64Buffer scores,
+    RWTexture2D<uint> processed, RWTexture2D<float4> image, RemovalScoreBuffer scores,
     uniform uint phase, uniform float hardness)
 {
     uint2 pixel = tid.xy * 4u + uint2(phase & 3u, phase >> 2u);
@@ -36,9 +69,7 @@ void accumulateRemovalCost(uint3 tid : SV_DispatchThreadID,
         // At the last entry there is no remaining background in this replay. This
         // form also stays finite when a hard, opaque splat drives t to zero.
         float3 delta = j + 1 == stop ? weight * source : (weight / t) * (source - remaining);
-        int64_t energy = int64_t(dot(delta, delta) * 1073741824.0);
-        // One fixed-point unit distinguishes measured zero contrast from never sampled.
-        atomicAddI64(scores, id, max(energy, int64_t(1)));
+        addRemovalScore(scores, id, dot(delta, delta) * REMOVAL_COST_SCALE);
         remaining -= weight * source;
         transmission *= t;
     }

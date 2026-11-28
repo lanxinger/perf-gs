@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
 // Clear the densification tracking buffers.
+
 #include "../common/fixed_point.slang"
 
 [shader("compute")]
@@ -11,7 +12,7 @@ void clearTracking(
     RWStructuredBuffer<uint> visibility_count_accum,
     GradBuffer grad_2d_x_iter,
     GradBuffer grad_2d_y_iter,
-    RWStructuredBuffer<int64_t> blend_weight_accum,
+    RWStructuredBuffer<fixed_t> blend_weight_accum,
     uniform uint max_splats)
 {
     uint i = dtid.x;
@@ -20,5 +21,5 @@ void clearTracking(
     visibility_count_accum[i] = 0u;
     grad_2d_x_iter[i] = GradScalar(0);
     grad_2d_y_iter[i] = GradScalar(0);
-    blend_weight_accum[i] = int64_t(0);
+    blend_weight_accum[i] = fixed_t(0);
 }

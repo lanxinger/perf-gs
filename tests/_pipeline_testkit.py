@@ -7,6 +7,7 @@ from __future__ import annotations
 import numpy as np
 
 from trainer.backend.compute.execution import TILE_HEIGHT, TILE_WIDTH
+from trainer.backend.compute.fixed_point import fixed_point_format
 from trainer.backend.memory.buffers import GRAD_SCALAR_COMPONENTS, decode_grad_buffer
 from trainer.backend.render.pipeline import TrainingPipeline, default_sort_pairs
 from trainer.config.config import (
@@ -85,7 +86,8 @@ class TestPipeline(TrainingPipeline):
     def read_gradients(self) -> dict[str, np.ndarray]:
         """The 14 SoA grad buffers as float64."""
         n = self.primitives.count()
-        return {name: decode_grad_buffer(self.buffers.gradients.params[name], n)
+        fmt = fixed_point_format(self.slang_session)
+        return {name: decode_grad_buffer(self.buffers.gradients.params[name], n, fixed_point=fmt)
                 for name in GRAD_SCALAR_COMPONENTS}
 
     def read_loss(self) -> float:

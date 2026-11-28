@@ -11,6 +11,13 @@ import numpy as np
 from PIL import Image
 
 from trainer.backend.compute.device import create_device
+from trainer.backend.compute.fixed_point import (
+    FIXED_POINT_INT32,
+    FIXED_POINT_INT64,
+    fixed_point_format,
+    fixed_point_shader_defines,
+    supports_int64_atomics,
+)
 from trainer.config.config import (
     AppearanceConfig,
     LossConfig,
@@ -80,9 +87,15 @@ def test_a_run_compiles_in_the_session_of_its_own_specialization() -> None:
     opaque = shader_specialization(_parse("--hub", "--splat-kernel", "opaque_core"))
     session = sessions.session_for(opaque)
     assert session is not device.slang_session
-    user_defines = {k: v for k, v in session.desc.compiler_options.defines.items()
-                    if k != "TRAINER_METAL_BACKEND"}
-    assert user_defines == shader_defines(opaque)
+    backend_defines = {
+        k: v for k, v in device.slang_session.desc.compiler_options.defines.items()
+        if k == "TRAINER_METAL_BACKEND"
+    }
+    assert session.desc.compiler_options.defines == {
+        **backend_defines,
+        **fixed_point_shader_defines(device),
+        **(shader_defines(opaque) or {}),
+    }
     assert sessions.session_for(opaque) is session
 
     # Disabling macros present on the initial device (hardness=1, bf16) must drop them
@@ -90,78 +103,80 @@ def test_a_run_compiles_in_the_session_of_its_own_specialization() -> None:
     plain = shader_specialization(
         _parse("--hub", "--extinction-hardness", "2", "--adam-moments", "fp32"))
     plain_session = sessions.session_for(plain)
-    plain_defines = dict(plain_session.desc.compiler_options.defines)
-    if device.info.type.name == "metal":
-        assert plain_defines == {"TRAINER_METAL_BACKEND": "1"}
-    else:
-        assert plain_defines == {}
+    assert dict(plain_session.desc.compiler_options.defines) == {
+        **backend_defines,
+        **fixed_point_shader_defines(device),
+    }
     device.close()
 
 
-def test_run_training_and_post_can_publish_completion_without_holding_viewer(tmp_path) -> None:
-    """macOS CLI viewer runs training on a worker thread (hold_viewer=False) while still
-    needing training_completed published to transition the open window out of RUNNING."""
-    from types import SimpleNamespace
-    from trainer.frontend.app import TrainingApplication
-    from trainer.frontend.viewer.session import Session, TrainingState
+def test_fixed_point_format_follows_device_atomic_int64_capability(monkeypatch) -> None:
+    import slangpy as spy
+    from trainer.backend.compute import device as device_module
 
-    def _run(publish_completion: bool | None) -> tuple[Session, list[str]]:
-        state = Session()
-        state.training_initializing(target_iterations=10)
-        state.training_running()
-        state.publish_training(gaussians=42)
-        held: list[str] = []
-        viewer = SimpleNamespace(
-            state=state,
-            finish_training=lambda _p: None,
-            unthrottled=lambda: __import__("contextlib").nullcontext(),
-            checkpoint=lambda: None,
-            hold_after_training=lambda _p: held.append("held"),
+    def fake_device(api_name: str, features: set, defines: dict[str, str] | None = None):
+        return SimpleNamespace(
+            info=SimpleNamespace(api_name=api_name),
+            has_feature=lambda feature: feature in features,
+            slang_session=SimpleNamespace(desc=SimpleNamespace(
+                compiler_options=SimpleNamespace(defines=dict(defines or {})))),
+            close=lambda: closed.append(True),
         )
-        artifacts = SimpleNamespace(
-            log_json=SimpleNamespace(write=lambda _s: None),
-            close_all=lambda: None,
-        )
-        app = TrainingApplication.__new__(TrainingApplication)
-        app.args = _parse("--iters", "10", "--no-evaluation")
-        app.paths = SimpleNamespace(root=tmp_path, cameras=tmp_path)
-        app.scene_context = SimpleNamespace(
-            colmapScene=None, test_indices=[], holdout_stride=8, camera_count=1)
-        app.targets = SimpleNamespace(srgb=None, linear=None)
-        app.runtime = SimpleNamespace(
-            viewer=viewer, pipeline=object(), profiler=None, artifacts=artifacts)
-        app._report_memory = lambda: {}
-        app._write_final_test_psnr = lambda _r: None
-        app.build_training_loop = lambda: SimpleNamespace(
-            launch_training_loop=lambda: SimpleNamespace(
-                iterations=10, wall_time_seconds=1.25, started_at=0.0,
-                stop_reason="completed", psnr_curve=[]))
-        # Skip post-training file I/O in this unit test.
-        import trainer.frontend.app as app_mod
-        orig_post = app_mod.run_post_training
-        app_mod.run_post_training = lambda **_kw: None
-        try:
-            if publish_completion is None:
-                app._run_training_and_post(hold_viewer=False)
-            else:
-                app._run_training_and_post(hold_viewer=False, publish_completion=publish_completion)
-        finally:
-            app_mod.run_post_training = orig_post
-        return state, held
 
-    # Default hold_viewer=False (Hub path): controller publishes completion, not _run_training_and_post.
-    hub_state, hub_held = _run(None)
-    assert hub_held == []
-    assert hub_state.snapshot().training_state == TrainingState.RUNNING
+    closed: list[bool] = []
+    vk_64 = fake_device("Vulkan", {spy.Feature.atomic_int64})
+    vk_32 = fake_device("Vulkan", set())
+    dx_64 = fake_device("D3D12", {spy.Feature.sm_6_6, spy.Feature.int64})
+    dx_32 = fake_device("D3D12", {spy.Feature.int64})
+    metal = fake_device("Metal", set(), {"TRAINER_METAL_BACKEND": "1"})
 
-    # macOS CLI viewer path: publishes completion without blocking in hold_after_training.
-    cli_state, cli_held = _run(True)
-    assert cli_held == []
-    snap = cli_state.snapshot()
-    assert snap.training_state == TrainingState.COMPLETED
-    assert snap.result is not None
-    assert snap.result.iterations == 10
-    assert snap.result.splats == 42
+    assert supports_int64_atomics(vk_64) and fixed_point_format(vk_64) is FIXED_POINT_INT64
+    assert not supports_int64_atomics(vk_32) and fixed_point_format(vk_32) is FIXED_POINT_INT32
+    assert supports_int64_atomics(dx_64) and fixed_point_format(dx_64) is FIXED_POINT_INT64
+    assert not supports_int64_atomics(dx_32) and fixed_point_format(dx_32) is FIXED_POINT_INT32
+    # Native Metal emulates exact 64-bit atomics for blend_weight/removal_cost and uses fp32 grads.
+    assert fixed_point_format(metal) is FIXED_POINT_INT64
+    assert fixed_point_shader_defines(metal) == {}
+
+    opens: list[dict[str, str] | None] = []
+
+    def fake_open(_backend, _debug, _sdi, defines):
+        opens.append(defines)
+        return fake_device("Vulkan", set(), defines)
+
+    monkeypatch.setattr(device_module, "_open_device", fake_open)
+    device = device_module.create_device(backend="vulkan", defines={"ADAM_MOMENTS_BF16": "1"})
+    assert opens == [
+        {"ADAM_MOMENTS_BF16": "1"},
+        {"FIXED_POINT_INT32": "1", "ADAM_MOMENTS_BF16": "1"},
+    ]
+    assert closed == [True]
+    assert fixed_point_shader_defines(device) == {"FIXED_POINT_INT32": "1"}
+
+
+def test_int32_device_preserves_fixed_point_define_across_slang_sessions() -> None:
+    launch = shader_specialization(_parse("--hub"))
+    device = create_device(defines={"FIXED_POINT_INT32": "1", **(shader_defines(launch) or {})})
+    try:
+        assert fixed_point_format(device) is FIXED_POINT_INT32
+        backend_defines = {
+            k: v for k, v in device.slang_session.desc.compiler_options.defines.items()
+            if k == "TRAINER_METAL_BACKEND"
+        }
+        sessions = SlangSessions(device)
+        assert sessions.session_for(launch) is device.slang_session
+
+        opaque = shader_specialization(_parse("--hub", "--splat-kernel", "opaque_core"))
+        session = sessions.session_for(opaque)
+        assert session is not device.slang_session
+        assert session.desc.compiler_options.defines == {
+            **backend_defines,
+            "FIXED_POINT_INT32": "1",
+            **(shader_defines(opaque) or {}),
+        }
+        assert fixed_point_format(session) is FIXED_POINT_INT32
+    finally:
+        device.close()
 
 
 def test_position_lr_horizon_follows_iters_unless_overridden() -> None:
@@ -481,3 +496,24 @@ def test_stbn_variables_absent_when_the_feature_is_off() -> None:
     loop = object.__new__(TrainingLoop)
     loop.stbn_sampler = None
     assert loop._stbn_variables(0) is None
+
+
+def test_prepare_run_creates_viewer_only_when_absent() -> None:
+    for has_viewer in (False, True):
+        app = object.__new__(TrainingApplication)
+        app.viewer = object() if has_viewer else None
+        app.scene_context = SimpleNamespace(name="scene")
+        steps: list[str] = []
+        app._prepare_scene = lambda scene_dir, prepared=None, s=steps: s.append(f"scene:{scene_dir}:{prepared}")
+        app._create_pipeline_for_scene = lambda scene, s=steps: s.append("pipeline")
+        app._prepare_textures = lambda s=steps: s.append("textures")
+        app._create_viewer = lambda scene, s=steps: s.append("viewer")
+        app._start_profiler = lambda s=steps: s.append("profiler")
+        app._create_training_services = lambda s=steps: s.append("services")
+
+        app.prepare_run("my_scene", "cached")
+
+        expected = ["scene:my_scene:cached", "pipeline", "textures", "profiler", "services"]
+        if not has_viewer:
+            expected.insert(3, "viewer")
+        assert steps == expected

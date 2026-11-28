@@ -1,7 +1,6 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""GPU resources grouped by owning component; gradients are SoA int64 fixed-point
-accumulators so every backend can use integer atomics."""
+"""GPU resources grouped by owner, including backend-sized fixed-point gradient accumulators."""
 
 from __future__ import annotations
 
@@ -22,6 +21,7 @@ from trainer.backend.compute.execution import (
     TILE_HEIGHT,
     TILE_WIDTH,
 )
+from trainer.backend.compute.fixed_point import FIXED_POINT_INT64, fixed_point_format
 from trainer.backend.memory.layout import StructLayout
 
 # One fixed-point gradient accumulator per optimized scalar, in GaussianChannel order.
@@ -297,33 +297,53 @@ FIXED_POINT_SCALE = 65536.0
 
 
 def is_float_grad_buffer(buf: spy.NDBuffer) -> bool:
-    """True when ``buf`` stores fp32 gradients (Metal) rather than int64 fixed-point (Vulkan/D3D12)."""
+    """True when ``buf`` stores fp32 gradients (Metal) rather than fixed-point integers."""
+    dtype = getattr(buf, "dtype", None)
+    if dtype is not None:
+        name = getattr(dtype, "name", None) or str(dtype)
+        if name == "float":
+            return True
+        if name in ("int", "int32_t", "int64_t"):
+            return False
     n = 1
     for dim in buf.shape:
         n *= int(dim)
     return n > 0 and buf.storage.size == n * 4
 
 
-def decode_grad_buffer(buf: spy.NDBuffer, count: int | None = None) -> np.ndarray:
-    """Read a gradient/accumulator buffer as float64 regardless of backend storage (fp32 vs int64)."""
+def _fixed_format_for_buffer(buf: spy.NDBuffer, fixed_point=None):
+    if fixed_point is not None:
+        return fixed_point
+    dtype = getattr(buf, "dtype", None)
+    name = (getattr(dtype, "name", None) or str(dtype)) if dtype is not None else ""
+    if name in ("int", "int32_t"):
+        from trainer.backend.compute.fixed_point import FIXED_POINT_INT32
+        return FIXED_POINT_INT32
+    return FIXED_POINT_INT64
+
+
+def decode_grad_buffer(buf: spy.NDBuffer, count: int | None = None, *, fixed_point=None) -> np.ndarray:
+    """Read a gradient/accumulator buffer as float64 regardless of backend storage (fp32, int32, int64)."""
     raw = buf.storage.to_numpy().tobytes()
     if is_float_grad_buffer(buf):
         vals = np.frombuffer(raw, dtype=np.float32)
         if count is not None:
             vals = vals[:count]
         return vals.astype(np.float64)
-    ints = np.frombuffer(raw, dtype=np.int64)
+    fmt = _fixed_format_for_buffer(buf, fixed_point)
+    ints = np.frombuffer(raw, dtype=fmt.dtype)
     if count is not None:
         ints = ints[:count]
-    return ints.astype(np.float64) / FIXED_POINT_SCALE
+    return ints.astype(np.float64) / fmt.scale
 
 
-def encode_grad_array(buf: spy.NDBuffer, values: np.ndarray) -> np.ndarray:
-    """Encode float gradient values into ``buf``'s backend storage dtype (fp32 vs int64 fixed-point)."""
+def encode_grad_array(buf: spy.NDBuffer, values: np.ndarray, *, fixed_point=None) -> np.ndarray:
+    """Encode float gradient values into ``buf``'s backend storage dtype (fp32, int32, or int64)."""
     arr = np.asarray(values, dtype=np.float64)
     if is_float_grad_buffer(buf):
         return arr.astype(np.float32)
-    return np.round(arr * FIXED_POINT_SCALE).astype(np.int64)
+    fmt = _fixed_format_for_buffer(buf, fixed_point)
+    return np.round(arr * fmt.scale).astype(fmt.dtype)
 
 
 @dataclass
@@ -345,8 +365,13 @@ def _reflect_types(module: spy.Module) -> _ShaderTypes:
         return slang_type
 
     gaussian = need("Gaussian3D")
-    grad_accum = module.layout.find_type_by_name("GradAccum")
-    grad_stride = int(grad_accum.buffer_layout.reflection.stride) if grad_accum is not None else 8
+    session = getattr(module, "session", None)
+    defines = getattr(getattr(getattr(session, "desc", None), "compiler_options", None), "defines", None) or {}
+    device_api = getattr(getattr(getattr(module, "device", None), "info", None), "api_name", None)
+    if "FIXED_POINT_INT32" not in defines and ("TRAINER_METAL_BACKEND" in defines or device_api == "Metal"):
+        grad_dtype = "float"
+    else:
+        grad_dtype = fixed_point_format(module).buffer_dtype
     return _ShaderTypes(
         gaussian=gaussian,
         projected=need("Projected2DGaussian"),
@@ -354,7 +379,7 @@ def _reflect_types(module: spy.Module) -> _ShaderTypes:
         adam=need("AdamState"),
         sh_moments=need("ShRestMoments"),
         gaussian_layout=StructLayout.of(gaussian),
-        grad_dtype="float" if grad_stride == 4 else "int64_t",
+        grad_dtype=grad_dtype,
     )
 
 
@@ -364,6 +389,7 @@ class _Alloc:
     device: spy.Device
     width: int
     height: int
+    fixed_dtype: str = FIXED_POINT_INT64.buffer_dtype
 
     def typed_buffer(self, label: str, dtype, *shape) -> spy.NDBuffer:
         return _make_labeled_ndbuffer(
@@ -372,8 +398,8 @@ class _Alloc:
     def uint_buffer(self, label: str, *shape) -> spy.NDBuffer:
         return self.typed_buffer(label, "uint", *shape)
 
-    def i64_buffer(self, label: str, *shape) -> spy.NDBuffer:
-        return self.typed_buffer(label, "int64_t", *shape)
+    def fixed_buffer(self, label: str, *shape) -> spy.NDBuffer:
+        return self.typed_buffer(label, self.fixed_dtype, *shape)
 
     def indirect_buffer(self, label: str, records: int = 1) -> spy.NDBuffer:
         return _make_labeled_ndbuffer(
@@ -481,7 +507,8 @@ def allocate(
 ) -> GaussianBuffers:
     """Allocate everything forward, backward, Adam and densification use."""
     types = _reflect_types(shared_data_module)
-    allocator = _allocator if _allocator is not None else _Alloc(device, width, height)
+    fixed_dtype = fixed_point_format(shared_data_module or device).buffer_dtype
+    allocator = _allocator if _allocator is not None else _Alloc(device, width, height, fixed_dtype)
     num_tiles_x, num_tiles_y = _tile_grid(width, height)
     num_tiles = num_tiles_x * num_tiles_y
     max_buckets = max_raster_buckets(max_sort_pairs, num_tiles)
@@ -517,7 +544,7 @@ def allocate(
         ssim_m2=allocator.tex(spy.Format.rgba32_float, "ssim_m2"),
         ssim_m3=allocator.tex(spy.Format.rgba32_float, "ssim_m3"),
     )
-    grad_dtype = getattr(types, "grad_dtype", "int64_t")
+    grad_dtype = getattr(types, "grad_dtype", fixed_dtype)
     grad_params = {name: allocator.typed_buffer(f"grad_buffers[{name}]", grad_dtype, max_splats)
                    for name in GRAD_SCALAR_COMPONENTS}
     grad_seeds = {name: allocator.typed_buffer(f"grad_2d_seed_buffers[{name}]", grad_dtype, max_splats)
@@ -526,7 +553,7 @@ def allocate(
 
     grad_mean_2d_mag = allocator.typed_buffer("densification.grad_mean_2d_mag", grad_dtype, max_splats)
     visibility_count = allocator.uint_buffer("densification.visibility_count", max_splats)
-    blend_weight = allocator.i64_buffer("densification.blend_weight", max_splats)
+    blend_weight = allocator.fixed_buffer("densification.blend_weight", max_splats)
     gradients = GradientResources(
         params=grad_params, seeds=grad_seeds,
         screen_x=allocator.typed_buffer("grad_2d_x_iter", grad_dtype, max_splats),
@@ -702,13 +729,15 @@ def allocate_viewer(
 class _AllocationCounter:
     """Runs the real allocation recipe, counting bytes instead of allocating."""
 
-    def __init__(self, width: int, height: int) -> None:
+    def __init__(self, width: int, height: int,
+                 fixed_dtype: str = FIXED_POINT_INT64.buffer_dtype) -> None:
         self.pixels = width * height
+        self.fixed_dtype = fixed_dtype
         self.total = 0
 
     def typed_buffer(self, label, dtype, *shape):
         from types import SimpleNamespace
-        stride = ({"uint": 4, "float": 4, "int64_t": 8, "uint2": 8, "float4": 16}[dtype]
+        stride = ({"uint": 4, "int": 4, "float": 4, "int64_t": 8, "uint2": 8, "float4": 16}[dtype]
                   if isinstance(dtype, str)
                   else int(dtype.buffer_layout.reflection.stride))
         size = int(np.prod(shape)) * stride
@@ -719,8 +748,8 @@ class _AllocationCounter:
     def uint_buffer(self, label, *shape):
         return self.typed_buffer(label, "uint", *shape)
 
-    def i64_buffer(self, label, *shape):
-        return self.typed_buffer(label, "int64_t", *shape)
+    def fixed_buffer(self, label, *shape):
+        return self.typed_buffer(label, self.fixed_dtype, *shape)
 
     def indirect_buffer(self, label, records=1):
         return self.uint_buffer(label, 3 * records)
@@ -735,7 +764,8 @@ class _AllocationCounter:
 
 def estimate_allocation_bytes(shared_data_module, *, viewer_only=False, **sizes) -> int:
     """Base buffer/texture bytes; excludes sampler resources and driver overhead."""
-    counter = _AllocationCounter(sizes["width"], sizes["height"])
+    fixed_dtype = fixed_point_format(shared_data_module).buffer_dtype
+    counter = _AllocationCounter(sizes["width"], sizes["height"], fixed_dtype)
     allocator = allocate_viewer if viewer_only else allocate
     allocator(device=None, shared_data_module=shared_data_module,
               _allocator=counter, **sizes)

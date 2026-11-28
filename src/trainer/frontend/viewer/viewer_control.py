@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Lifecycle of the optional in-process live viewer (a render thread sharing the device under ``gpu_lock``).
+"""Lifecycle of the optional in-process live viewer (running on the main thread, sharing the device under ``gpu_lock``).
 
 Methods are no-ops under ``--no-viewer``, but a :class:`~trainer.frontend.viewer.session.Session` always exists.
 """
@@ -51,9 +51,9 @@ class ViewerSession:
         pipeline: TrainingPipeline,
         camera_sets: tuple[CameraSet, ...] = (),
     ) -> ViewerSession:
-        """Build the viewer and push the initialized gaussians without starting the render thread.
+        """Build the viewer and push the initialized gaussians without starting the event loop.
 
-        Setup uploads still run without ``gpu_lock`` (a queue race), so call :meth:`start` once setup is done.
+        Setup uploads still run without ``gpu_lock`` (a queue race), so call :meth:`run` once setup is done.
         """
         from trainer.frontend.viewer.viewer import Viewer
 
@@ -68,7 +68,7 @@ class ViewerSession:
             state=state,
         )
         viewer.update_gaussians(pipeline)
-        print("[viewer] created (render thread starts after setup completes).")
+        print("[viewer] created (window starts after setup completes).")
         return cls(viewer, state)
 
     @classmethod
@@ -137,30 +137,30 @@ class ViewerSession:
         if self._viewer is not None:
             self._viewer.resume_rendering()
 
-    def start(self) -> None:
-        """Start the background render thread (call once setup submits are done)."""
-        if self._viewer is None:
-            return
-        self._viewer.start()
-        print("[viewer] render thread started.", flush=True)
+    def mark_starting(self) -> None:
+        """Mark the viewer active before starting a worker thread that polls :meth:`is_alive`."""
+        if self._viewer is not None:
+            self._viewer.mark_starting()
 
-    def run_blocking(self) -> None:
-        """Run the viewer loop on the current thread (used on macOS main thread)."""
-        if self._viewer is None:
-            return
-        print("[viewer] running render loop on main thread.", flush=True)
-        self._viewer.run_blocking()
+    def run(self) -> None:
+        """Run the viewer window and event loop on the calling (main) thread."""
+        if self._viewer is not None:
+            self._viewer.run()
 
-    def call_on_ui_thread(self, fn):
+    def stop(self) -> None:
+        """Ask the viewer loop to close."""
+        if self._viewer is not None:
+            self._viewer.stop()
+
+    def call_on_main_thread(self, callback):
+        """Run an OS UI operation on the viewer's main thread and return its result."""
         if self._viewer is None:
-            return fn()
-        return self._viewer.call_on_ui_thread(fn)
+            return callback()
+        return self._viewer.call_on_main_thread(callback)
 
     def is_alive(self) -> bool:
         """Whether the viewer loop has been started and is still running."""
-        if self._viewer is None:
-            return False
-        return self._viewer.is_alive()
+        return self._viewer is not None and self._viewer.is_alive()
 
     def wait_for_start(self) -> None:
         """Block until the viewer's 'Start Training' button, Enter in this terminal, or the window closing."""
@@ -235,7 +235,7 @@ class ViewerSession:
 
     def push_snapshot(self, pipeline: TrainingPipeline) -> None:
         """Push a gaussian snapshot: a GPU->GPU copy of the active splat range plus a 4-byte count readback."""
-        if self._viewer is not None:
+        if self._viewer is not None and not self._viewer.has_exited():
             self._viewer.update_gaussians(pipeline)
 
     def clear_view(self) -> None:
@@ -250,10 +250,11 @@ class ViewerSession:
         """
         if self._viewer is not None:
             self._viewer.set_training_active(False)
-            try:
-                self._viewer.update_gaussians(pipeline)
-            except Exception:
-                pass
+            if not self._viewer.has_exited():
+                try:
+                    self._viewer.update_gaussians(pipeline)
+                except Exception:
+                    pass
 
     def hold_after_training(self, pipeline: TrainingPipeline) -> None:
         """Push the final state and keep the window live until the user closes it (Ctrl-C stops the viewer)."""
@@ -263,9 +264,4 @@ class ViewerSession:
         if self._viewer is None:
             return
         print("[viewer] training done — viewer still live; close its window to exit.")
-        try:
-            thread = self._viewer._thread
-            if thread is not None:
-                thread.join()
-        except KeyboardInterrupt:
-            self._viewer.stop()
+        self._viewer.wait_until_closed()

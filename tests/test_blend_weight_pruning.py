@@ -145,3 +145,61 @@ def test_removal_cost_matches_rendering_without_each_splat(backend: str) -> None
     assert stats == {"pre_count": 3, "target_count": 2, "final_count": 2, "unobserved_count": 1}
     keep = [int(np.argmax(expected)), 2]
     np.testing.assert_allclose(pipeline.primitives.read()["mean"], scene["means"][keep])
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_removal_cost_int32_matches_omission_and_saturates(backend: str) -> None:
+    import slangpy as spy
+    from trainer.backend.compute.device import SHADERS_DIR, create_slang_session
+
+    pipeline = _pipeline(backend)
+    camera = simple_camera(width=SIZE, height=SIZE, eye=(0.0, 0.0, 0.0),
+                           target=(0.0, 0.0, 1.0), up=(0.0, 1.0, 0.0),
+                           fovy_degrees=60.0)
+    scene = _splats([0.0, 0.1, 50.0], [2.0, 3.0, 2.0], [0.65, 0.4, 0.9])
+    scene["color_logits"][:2] = [[1, -1, 0], [0, 1, -1]]
+
+    def render(keep):
+        pipeline.set_primitive_from_numpy(**{k: v[keep] for k, v in scene.items()})
+        pipeline.render(camera)
+        return pipeline.read_output_image()[..., :3].astype(np.float64)
+
+    omissions = [render([1, 2]), render([0, 2])]
+    image = render([0, 1, 2])
+    expected = [np.sum((image - omitted) ** 2) for omitted in omissions]
+
+    session = create_slang_session(pipeline.device, {"FIXED_POINT_INT32": "1"})
+    program = session.load_program(str(SHADERS_DIR / "densify/removal_cost.slang"), ["accumulateRemovalCost"])
+    kernel = pipeline.device.create_compute_kernel(program)
+    scores_buf = spy.NDBuffer(
+        device=pipeline.device, dtype="int", shape=(pipeline.max_splats,),
+        usage=spy.BufferUsage.shader_resource | spy.BufferUsage.unordered_access,
+    )
+    raster = pipeline.buffers.raster
+
+    def run_all_phases() -> np.ndarray:
+        for phase in range(16):
+            pipeline.commands.dispatch(
+                kernel, "removal_cost_i32",
+                thread_count=[(pipeline.width + 3) // 4, (pipeline.height + 3) // 4, 1],
+                camera=pipeline.rasterizer.camera_buffer, blend_data=raster.blend_data.storage,
+                tile_start=raster.tile_start.storage, sorted_ids=pipeline.rasterizer.sorted_values.storage,
+                processed=raster.gaussian_count_per_pixel, image=raster.output_image,
+                scores=scores_buf.storage, phase=(13 * phase) % 16, hardness=1.0,
+            )
+        pipeline.runtime.wait_for_idle()
+        return scores_buf.storage.to_numpy().view(np.int32).reshape(-1)[:3]
+
+    scores_buf.copy_from_numpy(np.zeros(pipeline.max_splats, dtype=np.int32))
+    scores = run_all_phases()
+    np.testing.assert_allclose(scores / 16384.0, [*expected, 0], atol=2e-2, rtol=5e-3)
+
+    # Seeding splat 0 near INT32_MAX must saturate at INT32_MAX rather than wrap negative/small.
+    int32_max = np.iinfo(np.int32).max
+    seed = np.zeros(pipeline.max_splats, dtype=np.int32)
+    seed[0] = int32_max - 10
+    scores_buf.copy_from_numpy(seed)
+    saturated = run_all_phases()
+    assert saturated[0] == int32_max
+    assert 0 < saturated[1] < int32_max
+    assert saturated[2] == 0

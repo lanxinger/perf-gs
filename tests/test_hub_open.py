@@ -22,9 +22,15 @@ from trainer.frontend.viewer.session import (
 def hub_for_one_request(monkeypatch):
     state = Session(MODE_HUB)
     alive = iter((True, False))
-    viewer = SimpleNamespace(state=state, is_alive=lambda: next(alive))
+    viewer = SimpleNamespace(
+        state=state,
+        is_alive=lambda: next(alive),
+        call_on_main_thread=lambda fn: fn(),
+    )
     monkeypatch.setattr(hub_module.time, "sleep", lambda seconds: None)
-    return state, TrainingHub(SimpleNamespace(_viewer=viewer, args=build_parser().parse_args(["--hub"])))
+    return state, TrainingHub(SimpleNamespace(
+        _viewer=viewer, viewer=viewer, args=build_parser().parse_args(["--hub"]),
+    ))
 
 
 @pytest.mark.parametrize("command", ["browse", "new_dataset"])
@@ -209,10 +215,11 @@ def test_failed_export_preserves_existing_file_and_model(tmp_path, monkeypatch):
 @pytest.mark.parametrize("scene", [None, "explicit-scene"])
 def test_startup_opens_an_explicit_scene_once(scene, monkeypatch):
     state = Session(MODE_HUB)
-    viewer = SimpleNamespace(state=state, start=lambda: None)
+    viewer = SimpleNamespace(state=state)
     args = build_parser().parse_args(["--hub"] + (["--scene", scene] if scene else []))
     app = SimpleNamespace(args=args, error_log=None, _create_device=lambda: None,
-                          device=None, gpu_lock=None, _viewer=viewer)
+                          device=None, gpu_lock=None, _viewer=viewer,
+                          run_with_viewer=lambda work: work())
     hub = TrainingHub(app)
     monkeypatch.setattr(hub_module.ViewerSession, "create_hub", lambda **kwargs: viewer)
     monkeypatch.setattr(ReconTools, "is_ready", lambda self: True)

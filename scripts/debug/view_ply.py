@@ -49,10 +49,9 @@ def main() -> None:
     viewer.update_gaussians(pipeline)
     # Static view: suppress the panel's "press Start Training" hint.
     viewer.set_training_active(True)
-    viewer.start()
 
     print("viewer running — close the window to exit")
-    viewer._thread.join()
+    viewer.run()
 
 
 if __name__ == "__main__":

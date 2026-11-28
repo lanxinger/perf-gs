@@ -6,7 +6,6 @@ from __future__ import annotations
 import math
 import os
 import queue
-import sys
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -457,10 +456,12 @@ class Viewer:
         import contextlib
         self.gpu_lock = gpu_lock if gpu_lock is not None else contextlib.nullcontext()
         self.runtime = GpuRuntime(device, self.gpu_lock)
-        self._thread: threading.Thread | None = None
-        self._running = False
-        self._ui_queue: queue.Queue = queue.Queue()
+        self._ui_thread_id: int | None = None
+        self._started = threading.Event()
+        self._exited = threading.Event()
+        self._main_thread_calls: queue.Queue = queue.Queue()
         self._stop_event = threading.Event()
+        self._closed_by_user = threading.Event()
 
         self._start_event = threading.Event()
         self._pause_event = threading.Event()
@@ -605,7 +606,7 @@ class Viewer:
     def wait_for_start(self, poll: float = 0.05) -> None:
         """Block until 'Start Training' is pressed or the viewer closes, so a closed viewer can't hang training."""
         while not self._start_event.is_set():
-            if self._stop_event.is_set() or (self._thread and not self._thread.is_alive()):
+            if self._stop_event.is_set() or self._exited.is_set():
                 break
             time.sleep(poll)
 
@@ -667,7 +668,7 @@ class Viewer:
         self._pause_event.clear()
 
     def stop_requested(self) -> bool:
-        return self._stop_training.is_set() or self._stop_event.is_set()
+        return self._stop_training.is_set() or self._closed_by_user.is_set()
 
     def clear_stop_request(self) -> None:
         self._stop_training.clear()
@@ -678,72 +679,80 @@ class Viewer:
             return
         self.state.training_paused()
         while self._pause_event.is_set():
-            if self._stop_event.is_set() or (self._thread and not self._thread.is_alive()):
+            if self._stop_event.is_set() or self._exited.is_set():
                 break
             time.sleep(poll)
         if not self.stop_requested():
             self.state.training_resumed()
 
-    def start(self):
-        self._stop_event.clear()
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-
-    def run_blocking(self):
-        """Run the viewer event/render loop on the current thread (required on macOS main thread)."""
-        self._stop_event.clear()
-        self._thread = threading.current_thread()
-        self._run()
+    def mark_starting(self) -> None:
+        """Record handoff to the main thread so ``is_alive()`` is true before ``run()`` enters."""
+        self._exited.clear()
+        self._started.set()
 
     def is_alive(self) -> bool:
-        if self._running:
-            return True
-        return self._thread is not None and self._thread is not threading.current_thread() and self._thread.is_alive()
+        return self._started.is_set() and not self._exited.is_set()
 
-    def call_on_ui_thread(self, fn: Callable):
-        """Run ``fn`` on the viewer thread (for Cocoa file dialogs on macOS), or inline if already there."""
-        if sys.platform != "darwin" or not self._running or threading.current_thread() is self._thread:
-            return fn()
-        done = threading.Event()
-        result: list = []
-        error: list = []
-        self._ui_queue.put((fn, done, result, error))
-        while not done.wait(0.05):
-            if not self._running or self._stop_event.is_set():
-                return None
-        if error:
-            raise error[0]
-        return result[0] if result else None
+    def has_exited(self) -> bool:
+        return self._exited.is_set()
 
-    def _drain_ui_queue(self) -> None:
-        while True:
-            try:
-                fn, done, result, error = self._ui_queue.get_nowait()
-            except queue.Empty:
-                return
-            try:
-                result.append(fn())
-            except Exception as exc:  # noqa: BLE001
-                error.append(exc)
-            finally:
-                done.set()
+    def wait_until_closed(self) -> None:
+        if self._started.is_set():
+            self._exited.wait()
 
-    def stop(self):
-        self._stop_event.set()
-        if self._thread and self._thread is not threading.current_thread():
-            self._thread.join(timeout=3.0)
-
-    def _run(self):
-        self._running = True
+    def run(self) -> None:
+        """Run the viewer window and event loop on the calling (main) thread."""
+        self._started.set()
+        self._ui_thread_id = threading.get_ident()
         try:
-            self._run_inner()
+            if not self._stop_event.is_set():
+                self._run_inner()
+        except KeyboardInterrupt:
+            self._closed_by_user.set()
+            self._stop_event.set()
+            raise
         except Exception as e:
             self._report_error("crashed", e)
         finally:
-            self._running = False
+            self._ui_thread_id = None
             self._stop_event.set()
             self._pause_event.clear()
-            self._drain_ui_queue()
+            self._exited.set()
+
+    def call_on_main_thread(self, callback):
+        """Run an OS UI operation on the viewer's main thread and return its result."""
+        if not self._started.is_set() or threading.get_ident() == self._ui_thread_id:
+            return callback()
+        if self._exited.is_set():
+            raise RuntimeError("viewer closed before the UI operation could run")
+        completed = threading.Event()
+        result: dict[str, object] = {}
+        self._main_thread_calls.put((callback, completed, result))
+        while not completed.wait(0.05):
+            if self._exited.is_set():
+                raise RuntimeError("viewer closed before the UI operation could run")
+        if "error" in result:
+            raise result["error"]
+        return result.get("value")
+
+    def _run_main_thread_calls(self) -> None:
+        while True:
+            try:
+                callback, completed, result = self._main_thread_calls.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                result["value"] = callback()
+            except BaseException as error:
+                result["error"] = error
+                if isinstance(error, KeyboardInterrupt):
+                    raise
+            finally:
+                completed.set()
+
+    def stop(self) -> None:
+        self._closed_by_user.set()
+        self._stop_event.set()
 
     def _report_error(self, context: str, error: Exception) -> None:
         signature = (context, type(error), str(error))
@@ -966,37 +975,44 @@ class Viewer:
             self.device, self._pipeline, self.runtime) if self.hot_reload else None
         last_time = time.perf_counter()
 
-        while not window.should_close() and not self._stop_event.is_set():
-            window.process_events()
-            self._drain_ui_queue()
-            if self._suspend.is_set():  # hub setup owns the GPU queue right now
-                time.sleep(0.02)
-                continue
-            if watcher:
-                watcher.poll()
-
-            _reconfigure(window.width, window.height)
-
-            now = time.perf_counter()
-            dt = min(now - last_time, 0.1)
-            last_time = now
-            self._rig.advance(keys.held, dt)
-            view.sample()   # the frame's single, consistent state snapshot
-
-            try:
-                render_frame()
-                self._last_error = None
-            except Exception as e:
-                self._report_error("frame error", e)
-                time.sleep(0.016)
-
-            # Even a cached scene submits a UI pass and presents on the training GPU.
-            # Wait outside both locks, and count time already spent drawing this frame.
-            remaining = self._training_frame_interval() - (time.perf_counter() - now)
-            if remaining > 0:
-                self._stop_event.wait(remaining)
-
         try:
-            window.close()
-        except Exception as error:
-            self._report_error("closing the window failed", error)
+            while not window.should_close() and not self._stop_event.is_set():
+                self._run_main_thread_calls()
+                window.process_events()
+                if self._suspend.is_set():  # hub setup owns the GPU queue right now
+                    time.sleep(0.02)
+                    continue
+                if watcher:
+                    watcher.poll()
+
+                _reconfigure(window.width, window.height)
+
+                now = time.perf_counter()
+                dt = min(now - last_time, 0.1)
+                last_time = now
+                self._rig.advance(keys.held, dt)
+                view.sample()   # the frame's single, consistent state snapshot
+
+                try:
+                    render_frame()
+                    self._last_error = None
+                except Exception as e:
+                    self._report_error("frame failed; viewer stopped", e)
+                    # A frame failure may leave the acquired surface image unpresented;
+                    # close the viewer without aborting active training.
+                    self._stop_event.set()
+                    break
+
+                # Even a cached scene submits a UI pass and presents on the training GPU.
+                # Wait outside both locks, and count time already spent drawing this frame.
+                remaining = self._training_frame_interval() - (time.perf_counter() - now)
+                if remaining > 0:
+                    self._stop_event.wait(remaining)
+
+            if window.should_close():
+                self._closed_by_user.set()
+        finally:
+            try:
+                window.close()
+            except Exception as error:
+                self._report_error("closing the window failed", error)

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import io
 import json
+import queue
 import threading
 import time
 from types import SimpleNamespace
@@ -28,8 +29,10 @@ def _viewer() -> Viewer:
     viewer.state.training_running()
     viewer.state.training_finalizing("Final metrics")
     viewer._training_active = False
-    viewer._thread = None
+    viewer._ui_thread_id = None
+    viewer._main_thread_calls = queue.Queue()
     for name in ("_pause_event", "_stop_training", "_stop_event",
+                 "_closed_by_user", "_started", "_exited",
                  "_frame_budget_off", "_scene_dirty"):
         setattr(viewer, name, threading.Event())
     return viewer
@@ -309,12 +312,14 @@ def test_stopping_final_evaluation_retains_the_pipeline_and_closes_resources(
     monkeypatch.setattr(app_module, "run_post_training",
                         lambda **_kwargs: pytest.fail("another pass started after Stop"))
 
-    app._run_training_and_post(hold_viewer=False)
+    summary = app.run_training_and_post(hold_viewer=False)
 
     assert app.pipeline is pipeline
     assert pipeline.rendered == [0]
     assert events == ["snapshot", "profiler closed", "artifacts closed"]
-    assert viewer.state.snapshot().training_state == TrainingState.STOPPING
+    assert viewer.stop_requested()
+    assert viewer.state.snapshot().training_state == TrainingState.COMPLETED
+    assert viewer.state.snapshot().result == summary
     assert not viewer._frame_budget_off.is_set()
 
 
@@ -325,7 +330,7 @@ def test_cli_metrics_complete_before_waiting_for_the_viewer(tmp_path, monkeypatc
     monkeypatch.setattr(app_module, "run_post_training", lambda **_kwargs: events.append("metrics"))
     monkeypatch.setattr(app.viewer, "hold_after_training", lambda _pipeline: events.append("hold"))
 
-    app._run_training_and_post()
+    app.run_training_and_post()
 
     assert events == ["snapshot", "held-out", "metrics", "profiler closed",
                       "artifacts closed", "hold"]
@@ -380,3 +385,72 @@ def test_stop_does_not_overwrite_completion_after_waking_the_worker(monkeypatch)
     assert viewer.stop_requested()
     assert viewer.state.snapshot().training_state == TrainingState.COMPLETED
     assert viewer.state.snapshot().result == result
+
+
+def test_run_with_viewer_runs_ui_loop_and_dialogs_on_main_thread() -> None:
+    viewer = _viewer()
+    app = object.__new__(TrainingApplication)
+    app.viewer = ViewerSession(viewer)
+    seen: dict[str, int] = {}
+
+    def fake_inner() -> None:
+        seen["viewer"] = threading.get_ident()
+        while not viewer._stop_event.is_set():
+            viewer._run_main_thread_calls()
+            time.sleep(0.005)
+
+    viewer._run_inner = fake_inner
+
+    def worker() -> None:
+        seen["worker"] = threading.get_ident()
+        assert app.viewer.is_alive()
+        seen["dialog"] = app.viewer.call_on_main_thread(threading.get_ident)
+        viewer.stop()
+        viewer.wait_until_closed()
+
+    app.run_with_viewer(worker)
+
+    main_id = threading.get_ident()
+    assert seen["viewer"] == main_id
+    assert seen["dialog"] == main_id
+    assert seen["worker"] != main_id
+    assert viewer.has_exited()
+
+
+def test_run_with_viewer_without_viewer_runs_inline() -> None:
+    app = object.__new__(TrainingApplication)
+    app.viewer = ViewerSession(None)
+    ran_on: list[int] = []
+    app.run_with_viewer(lambda: ran_on.append(threading.get_ident()))
+    assert ran_on == [threading.get_ident()]
+
+
+def test_worker_failure_closes_viewer_and_propagates() -> None:
+    viewer = _viewer()
+    viewer._run_inner = lambda: viewer._stop_event.wait(5.0)
+    app = object.__new__(TrainingApplication)
+    app.viewer = ViewerSession(viewer)
+
+    def worker() -> None:
+        raise RuntimeError("boom during run")
+
+    with pytest.raises(RuntimeError, match="boom during run"):
+        app.run_with_viewer(worker)
+
+    assert viewer.has_exited()
+
+
+def test_viewer_crash_does_not_abort_active_worker() -> None:
+    viewer = _viewer()
+    app = object.__new__(TrainingApplication)
+    app.viewer = ViewerSession(viewer)
+    viewer._run_inner = lambda: (_ for _ in ()).throw(RuntimeError("swapchain lost"))
+    completed: list[bool] = []
+
+    def worker() -> None:
+        viewer.wait_until_closed()
+        assert not app.viewer.stop_requested()
+        completed.append(True)
+
+    app.run_with_viewer(worker)
+    assert completed == [True]

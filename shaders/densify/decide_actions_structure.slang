@@ -31,7 +31,7 @@ void decideActionsStructure(
     StructuredBuffer<uint> eta_max_z,
     ReadGradBuffer grad_mean_2d_mag_accum,
     StructuredBuffer<uint> visibility_count_accum,
-    StructuredBuffer<int64_t> blend_weight_accum,
+    StructuredBuffer<fixed_t> blend_weight_accum,
     RWStructuredBuffer<uint> action,
     RWStructuredBuffer<uint> split_factor_x,
     RWStructuredBuffer<uint> split_factor_y,
@@ -58,10 +58,10 @@ void decideActionsStructure(
     float high_ratio = float(eta_n_high[gaussian_idx]) * inv_total;
     float low_ratio  = float(eta_n_low[gaussian_idx])  * inv_total;
 
-    // Eta maxima are uint(eta*FIXED_SCALE): decode with a plain divide, not fromFixed (int64 grad convention).
-    float eta_x = float(eta_max_x[gaussian_idx]) / FIXED_SCALE;
-    float eta_y = float(eta_max_y[gaussian_idx]) / FIXED_SCALE;
-    float eta_z = float(eta_max_z[gaussian_idx]) / FIXED_SCALE;
+    // Eta maxima are uint(eta*ETA_FIXED_SCALE): decode with a plain divide, not fromFixed (grad convention).
+    float eta_x = float(eta_max_x[gaussian_idx]) / ETA_FIXED_SCALE;
+    float eta_y = float(eta_max_y[gaussian_idx]) / ETA_FIXED_SCALE;
+    float eta_z = float(eta_max_z[gaussian_idx]) / ETA_FIXED_SCALE;
 
     uint vis = visibility_count_accum[gaussian_idx];
     float avg_grad = 0.0;

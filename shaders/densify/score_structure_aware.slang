@@ -172,9 +172,9 @@ void record_observations(uint gaussian_idx, float eta_x, float eta_y, float eta_
     else if (eta_max_scalar <= ETA_LOW) InterlockedAdd(eta_n_low[gaussian_idx], 1u);
 
     // Per-axis max over views feeds the anisotropic split decision.
-    InterlockedMax(eta_max_x[gaussian_idx], uint(max(eta_x, 0.0) * FIXED_SCALE));
-    InterlockedMax(eta_max_y[gaussian_idx], uint(max(eta_y, 0.0) * FIXED_SCALE));
-    InterlockedMax(eta_max_z[gaussian_idx], uint(max(eta_z, 0.0) * FIXED_SCALE));
+    InterlockedMax(eta_max_x[gaussian_idx], uint(max(eta_x, 0.0) * ETA_FIXED_SCALE));
+    InterlockedMax(eta_max_y[gaussian_idx], uint(max(eta_y, 0.0) * ETA_FIXED_SCALE));
+    InterlockedMax(eta_max_z[gaussian_idx], uint(max(eta_z, 0.0) * ETA_FIXED_SCALE));
 }
 
 [shader("compute")]

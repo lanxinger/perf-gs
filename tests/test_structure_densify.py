@@ -704,3 +704,92 @@ def test_eta_carried_through_morton_sort(gpu_device) -> None:
             f"slot {i} (x={g[i,0]:.2f}) expected eta {expected}, got {eta['n_total'][i]}")
         for key in ("n_high", "n_low", "max_x", "max_y", "max_z"):
             assert eta[key][i] == expected, f"slot {i} {key} misaligned after sort"
+
+
+def test_eta_max_scale_is_independent_of_int32_fixed_point(gpu_device) -> None:
+    """eta_max_{x,y,z} are uint InterlockedMax buffers, so FIXED_POINT_INT32=1
+    must encode and decode them at ETA_FIXED_SCALE=65536 rather than FIXED_SCALE=4096."""
+    import slangpy as spy
+    from trainer.backend.compute.device import create_slang_session
+    from trainer.backend.compute.kernels import KernelLibrary
+
+    p = _setup(gpu_device, max_splats=64)
+    cam = simple_camera(width=64, height=64, eye=(0.0, 0.0, 0.0),
+                        target=(0.0, 0.0, 1.0), up=(0.0, 1.0, 0.0), fovy_degrees=60.0)
+    _one_gaussian(p, scale=0.35, opacity=0.9)
+    p.rasterize(cam)
+
+    field = np.zeros((64, 64, 4), dtype=np.float32)
+    field[..., 0] = 0.25
+    tex = p.device.create_texture(
+        type=spy.TextureType.texture_2d, format=spy.Format.rgba32_float, width=64, height=64,
+        usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access, label="sbar_i32")
+    tex.copy_from_numpy(np.ascontiguousarray(field))
+
+    p.structure_densifier.clear_scores()
+    p.structure_densifier.accumulate_scores(tex, p.rasterizer.camera_buffer, pass_idx=0)
+    p.runtime.wait_for_idle()
+    ref_eta = {k: int(_read_eta(p, 1)[k][0]) for k in ("max_x", "max_y", "max_z")}
+    assert any(v > 0 for v in ref_eta.values())
+
+    session = create_slang_session(p.device, {"FIXED_POINT_INT32": "1"})
+    kernels = KernelLibrary(p.device, session)
+    score_k = kernels.kernel("densify/score_structure_aware.slang", "scoreStructureAware")
+    decide_k = kernels.kernel("densify/decide_actions_structure.slang", "decideActionsStructure")
+    zeros_i32 = spy.NDBuffer(
+        device=p.device, dtype="int", shape=(p.max_splats,),
+        usage=spy.BufferUsage.shader_resource | spy.BufferUsage.unordered_access,
+    )
+    zeros_i32.copy_from_numpy(np.zeros(p.max_splats, dtype=np.int32))
+    grad_i32 = spy.NDBuffer(
+        device=p.device, dtype="int", shape=(p.max_splats,),
+        usage=spy.BufferUsage.shader_resource | spy.BufferUsage.unordered_access,
+    )
+    g_arr = np.zeros(p.max_splats, dtype=np.int32)
+    g_arr[0] = int(1.0 * 4096.0)
+    grad_i32.copy_from_numpy(g_arr)
+
+    b = p.buffers
+    p.structure_densifier.clear_scores()
+    p.commands.dispatch(
+        score_k, "score_i32", thread_count=[p.max_splats, 1, 1],
+        gaussians=b.primitive.values.storage, num_gaussians_counter=b.primitive.active_count.storage,
+        camera=p.rasterizer.camera_buffer, structure_tensor=tex,
+        tile_count_per_gaussian=b.raster.tile_count_per_gaussian.storage,
+        grad_2d_x_iter=zeros_i32.storage, grad_2d_y_iter=zeros_i32.storage,
+        eta_n_high=b.eta.components["n_high"].storage, eta_n_low=b.eta.components["n_low"].storage,
+        eta_max_x=b.eta.components["max_x"].storage, eta_max_y=b.eta.components["max_y"].storage,
+        eta_max_z=b.eta.components["max_z"].storage, eta_n_total=b.eta.n_total.storage,
+        opacity_threshold=0.05, per_view_grad_thresh=0.0, pass_idx=0, max_splats=p.max_splats,
+    )
+    p.runtime.wait_for_idle()
+    i32_eta = {k: int(_read_eta(p, 1)[k][0]) for k in ("max_x", "max_y", "max_z")}
+    assert i32_eta == ref_eta
+
+    # Decode check: eta_max=(4, 2, 0.05) encoded at 65536 must split into (2, 2, 1), not (8, 6, 1).
+    _set_eta(p, 0, n_total=10, n_high=10, n_low=0, eta_max=(4.0, 2.0, 0.05), grad_high=True)
+    p.commands.dispatch(
+        decide_k, "decide_i32", thread_count=[p.max_splats, 1, 1],
+        gaussians=b.primitive.values.storage, num_gaussians_counter=b.primitive.active_count.storage,
+        eta_n_total=b.eta.n_total.storage,
+        eta_n_high=b.eta.components["n_high"].storage, eta_n_low=b.eta.components["n_low"].storage,
+        eta_max_x=b.eta.components["max_x"].storage, eta_max_y=b.eta.components["max_y"].storage,
+        eta_max_z=b.eta.components["max_z"].storage,
+        grad_mean_2d_mag_accum=grad_i32.storage, visibility_count_accum=b.densification.visibility_count.storage,
+        blend_weight_accum=zeros_i32.storage,
+        action=b.densification.actions.storage,
+        split_factor_x=b.structure.split_factor_x.storage,
+        split_factor_y=b.structure.split_factor_y.storage,
+        split_factor_z=b.structure.split_factor_z.storage,
+        densify_children_sum=b.structure.children_sum.storage,
+        selected_parents=b.densification.valid_mask.storage,
+        selected_count=b.densification.post_count.storage,
+        tau_split=0.8, tau_prune=0.8, grad_threshold_internal=0.1,
+        split_power=0.5, max_split_factor=8, t_opacity=0.005, dense_scale=0.0,
+        min_blend_weight=0.0, max_splats=p.max_splats,
+    )
+    p.runtime.wait_for_idle()
+    assert int(b.densification.actions.to_numpy().view(np.uint32)[0]) == 1
+    factors = tuple(int(getattr(b.structure, f"split_factor_{ax}").to_numpy().view(np.uint32)[0])
+                    for ax in ("x", "y", "z"))
+    assert factors == (2, 2, 1)

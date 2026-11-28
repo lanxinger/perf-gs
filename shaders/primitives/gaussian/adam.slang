@@ -11,7 +11,7 @@
 void adamStep(
     uint3 dtid: SV_DispatchThreadID,
     RWStructuredBuffer<Gaussian3D> primitives,
-    RWStructuredBuffer<int64_t> gradients,
+    RWStructuredBuffer<fixed_t> gradients,
     RWStructuredBuffer<float> moment1,
     RWStructuredBuffer<float> moment2,
     StructuredBuffer<uint> num_primitives_counter,
